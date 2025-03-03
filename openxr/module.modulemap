@@ -1,0 +1,5 @@
+module OpenXR {
+    umbrella header "openxr.h"
+    export *
+    module * { export * }
+}
