@@ -20,25 +20,52 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		128879252D77C295000D2CAB /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = Modules/openxr;
+			dstSubfolderSpec = 7;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		12B25F6C2D72572E008F05B9 /* OpenXRRuntime.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = OpenXRRuntime.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		12B25F772D72572E008F05B9 /* OpenXRRuntimeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OpenXRRuntimeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+		1288792E2D77C2A8000D2CAB /* Exceptions for "OpenXRRuntime" folder in "Copy Files" phase from "OpenXRRuntime" target */ = {
+			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+			buildPhase = 128879252D77C295000D2CAB /* CopyFiles */;
+			membershipExceptions = (
+				openxr/module.modulemap,
+				openxr/openxr_loader_negotiation.h,
+				openxr/openxr_platform_defines.h,
+				openxr/openxr_platform.h,
+				openxr/openxr_reflection_parent_structs.h,
+				openxr/openxr_reflection_structs.h,
+				openxr/openxr_reflection.h,
+				openxr/openxr.h,
+			);
+		};
+/* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		12B25F6E2D72572E008F05B9 /* OpenXRRuntime */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				1288792E2D77C2A8000D2CAB /* Exceptions for "OpenXRRuntime" folder in "Copy Files" phase from "OpenXRRuntime" target */,
+			);
 			path = OpenXRRuntime;
 			sourceTree = "<group>";
 		};
 		12B25F7B2D72572E008F05B9 /* OpenXRRuntimeTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = OpenXRRuntimeTests;
-			sourceTree = "<group>";
-		};
-		12B25FA92D7266D5008F05B9 /* openxr */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = openxr;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -68,7 +95,6 @@
 				12B25F6E2D72572E008F05B9 /* OpenXRRuntime */,
 				12B25F7B2D72572E008F05B9 /* OpenXRRuntimeTests */,
 				12B25F6D2D72572E008F05B9 /* Products */,
-				12B25FA92D7266D5008F05B9 /* openxr */,
 			);
 			sourceTree = "<group>";
 		};
@@ -102,6 +128,7 @@
 				12B25F682D72572E008F05B9 /* Sources */,
 				12B25F692D72572E008F05B9 /* Frameworks */,
 				12B25F6A2D72572E008F05B9 /* Resources */,
+				128879252D77C295000D2CAB /* CopyFiles */,
 			);
 			buildRules = (
 			);
@@ -109,7 +136,6 @@
 			);
 			fileSystemSynchronizedGroups = (
 				12B25F6E2D72572E008F05B9 /* OpenXRRuntime */,
-				12B25FA92D7266D5008F05B9 /* openxr */,
 			);
 			name = OpenXRRuntime;
 			packageProductDependencies = (
@@ -374,12 +400,15 @@
 				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = NO;
+				DEVELOPMENT_ASSET_PATHS = OpenXRRuntime/openxr;
 				DEVELOPMENT_TEAM = 54KYVB5Y5C;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				DYLIB_INSTALL_NAME_BASE = "@rpath";
 				ENABLE_MODULE_VERIFIER = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/OpenXRRuntime/openxr";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -395,8 +424,10 @@
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "xros xrsimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INCLUDE_PATHS = "$(PROJECT_DIR)/OpenXRRuntime/openxr";
 				SWIFT_INSTALL_MODULE = YES;
 				SWIFT_INSTALL_OBJC_HEADER = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 7;
 			};
@@ -408,12 +439,15 @@
 				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = NO;
+				DEVELOPMENT_ASSET_PATHS = OpenXRRuntime/openxr;
 				DEVELOPMENT_TEAM = 54KYVB5Y5C;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				DYLIB_INSTALL_NAME_BASE = "@rpath";
 				ENABLE_MODULE_VERIFIER = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/OpenXRRuntime/openxr";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -429,8 +463,10 @@
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "xros xrsimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INCLUDE_PATHS = "$(PROJECT_DIR)/OpenXRRuntime/openxr";
 				SWIFT_INSTALL_MODULE = YES;
 				SWIFT_INSTALL_OBJC_HEADER = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 7;
 			};
