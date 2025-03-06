@@ -1,9 +1,12 @@
-import Foundation
-import RealityKit
+//import Foundation
+//import RealityKit
 import ARKit
 // contains "openxr.h" from the official sdk
 import OpenXR
 import Darwin // For strncpy
+import SwiftUI
+import CompositorServices
+//import AppDelegate
 
 // MARK: - OpenXR Function Pointer Type Aliases
 
@@ -219,10 +222,112 @@ public func xrGetInstanceProcAddr(_ instance: XrInstance,
     }
     return XR_SUCCESS
 }
+// MARK: swift app stuff
+struct MetalLayerConfiguration: CompositorLayerConfiguration {
+    func makeConfiguration(capabilities: LayerRenderer.Capabilities,
+                           configuration: inout LayerRenderer.Configuration)
+    {
+        let supportsFoveation = capabilities.supportsFoveation
+        let supportedLayouts = capabilities.supportedLayouts(options: supportsFoveation ? [.foveationEnabled] : [])
+        
+        // The device supports the `dedicated` and `layered` layouts, and optionally `shared` when foveation is disabled
+        // The simulator supports the `dedicated` and `shared` layouts.
+        // However, since we use vertex amplification to implement shared rendering, it won't work on the simulator in this project.
+        configuration.layout = supportedLayouts.contains(.layered) ? .layered : .dedicated
+        print("layout: \(configuration.layout)")
+        configuration.isFoveationEnabled = supportsFoveation
+        print("supportsFoveation: \(supportsFoveation)")
+        configuration.colorFormat = .rgba16Float
+    }
+}
 
+public struct OpenXRScene: Scene {
+    @State  var immersionStyle: (any ImmersionStyle) = FullImmersionStyle.full
+    let onLayerRendererReceived: ((LayerRenderer) -> Void)?
+    let onAppear: (() -> Void)?
+    @Binding var setImmersiveSpace: Bool
+    @Binding var isLoading: Bool
+    
+    public init(onLayerRendererReceived: ((LayerRenderer) -> Void)?, onAppear: (() -> Void)?, setImmersiveSpace: Binding<Bool>, isLoading: Binding<Bool>) {
+        self.onLayerRendererReceived = onLayerRendererReceived
+        self.onAppear = onAppear
+        _setImmersiveSpace = setImmersiveSpace
+        _isLoading = isLoading
+    }
+    
+    public var body: some SwiftUI.Scene {
+        WindowGroup {
+            ContentView($immersionStyle, $setImmersiveSpace, $isLoading)
+                .frame(minWidth: 480, maxWidth: 480, minHeight: 200, maxHeight: 320)
+                .onAppear {
+                    onAppear?()
+                }
+        }
+        .windowResizability(.contentSize)
+        ImmersiveSpace(id: "OpenXR") {
+            CompositorLayer(configuration: MetalLayerConfiguration()) { layerRenderer in
+                onLayerRendererReceived?(layerRenderer)
+                globalLayerRenderer = layerRenderer
+            }
+        }
+        .immersionStyle(selection: $immersionStyle, in: .mixed, .full)
+    }
+}
+
+struct ContentView: View {
+    @Environment(\.openImmersiveSpace) var openImmersiveSpace
+    @Environment(\.dismissImmersiveSpace) var dismissImmersiveSpace
+    @Environment(\.dismiss) private var dismiss
+
+    @Binding private var immersionStyle: any ImmersionStyle
+    @Binding var showImmersiveSpace: Bool
+    
+//    @State private var useMixedImmersion = false
+//    @State private var passthroughCutoffAngle = 60.0
+    @Binding var isLoading: Bool
+
+    init(_ immersionStyle: Binding<any ImmersionStyle>, _ showImmersiveSpace: Binding<Bool>, _ isLoading: Binding<Bool>) {
+        _immersionStyle = immersionStyle
+        _showImmersiveSpace = showImmersiveSpace
+        _isLoading = isLoading
+    }
+
+    var body: some View {
+        VStack {
+            if isLoading {
+                Image("SplashImage")
+            }
+        }
+        .onChange(of: showImmersiveSpace) { _, newValue in
+            Task {
+                print("showImmersiveSpace", newValue)
+                if newValue {
+                    await openImmersiveSpace(id: "OpenXR")
+                } else {
+                    await dismissImmersiveSpace()
+                }
+            }
+        }
+//        .onChange(of: useMixedImmersion) { _, _ in
+//            immersionStyle = useMixedImmersion ? .mixed : .full
+//        }
+//        .onChange(of: passthroughCutoffAngle) { _, _ in
+//            // Adjust renderer configuration if needed.
+//        }
+        .onChange(of: isLoading) { _, newValue in
+            if !newValue {
+                dismiss()
+            }
+        }
+    }
+}
+
+var globalLayerRenderer: LayerRenderer? = nil
+
+// MARK: openxr impl
 struct Instance {
     var eventQueue: [Event] = []
-    var session: UnsafeMutablePointer<Session>? // just one session for now
+    var session: UnsafeMutablePointer<Session>? // just one session for now (mutable pointer cause
     let metalDevice: MTLDevice = MTLCreateSystemDefaultDevice()!
     
     mutating func enqueueEvent(_ event: Event) {
@@ -245,7 +350,7 @@ enum Event {
         case .sessionStateChanged(let state):
             buffer.type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED
             
-            print("Filling event data with session state: \(state)")
+            print("new state: \(state)")
             withUnsafeMutablePointer(to: &buffer) { ptr in
                 let sessionStateChangedPtr = UnsafeMutableRawPointer(ptr)
                     .assumingMemoryBound(to: XrEventDataSessionStateChanged.self)
@@ -262,6 +367,10 @@ struct Session {
     let metalDevice: MTLDevice
     let arSession: ARKitSession
     var worldTrackingProvider: WorldTrackingProvider
+    var commandQueue : MTLCommandQueue
+    
+    var currentFrame: LayerRenderer.Frame?
+    var swapchain: Swapchain?
 }
 
 class Swapchain {
@@ -281,7 +390,6 @@ extension simd_float4x4 {
         return simd_quaternion(self)
     }
 }
-
 @_cdecl("xrCreateInstance")
 public func xrCreateInstance(_ createInfo: UnsafePointer<XrInstanceCreateInfo>?,
                              _ instance: UnsafeMutablePointer<XrInstance>?) -> XrResult {
@@ -289,6 +397,7 @@ public func xrCreateInstance(_ createInfo: UnsafePointer<XrInstanceCreateInfo>?,
     guard let instanceOut = instance else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
+    
     let myInstancePtr = UnsafeMutablePointer<Instance>.allocate(capacity: 1)
     myInstancePtr.initialize(to: Instance())
     instanceOut.pointee = OpaquePointer(myInstancePtr)
@@ -316,7 +425,7 @@ public func xrCreateSession(_ instance: XrInstance,
     }
     
     inst.session = UnsafeMutablePointer<Session>.allocate(capacity: 1)
-    inst.session!.initialize(to: Session(metalDevice: inst.metalDevice, arSession: ARKitSession(), worldTrackingProvider: WorldTrackingProvider()))
+    inst.session!.initialize(to: Session(metalDevice: inst.metalDevice, arSession: ARKitSession(), worldTrackingProvider: WorldTrackingProvider(), commandQueue: inst.metalDevice.makeCommandQueue()!))
     
     let session = inst.session?.pointee
     
@@ -371,7 +480,7 @@ public func xrLocateViews(_ session: XrSession,
     print("xrLocateViews called")
     
     let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>.self)
-    let sess = sess_ptr.pointee
+    var sess = sess_ptr.pointee
     
     // maybe this should be in beginframe?
     let semaphore = DispatchSemaphore(value: 0)
@@ -384,6 +493,7 @@ public func xrLocateViews(_ session: XrSession,
         }
         semaphore.signal()
     }
+    
     semaphore.wait()
     
     let timestamp = Date().timeIntervalSince1970
@@ -391,56 +501,294 @@ public func xrLocateViews(_ session: XrSession,
         print("No device anchor available")
         return XR_ERROR_RUNTIME_FAILURE
     }
-    printDeviceAnchorState(deviceAnchor)
-    
     if !deviceAnchor.isTracked {
         print("Device anchor is not tracked")
         return XR_ERROR_RUNTIME_FAILURE
     }
-
-    viewCountOutput?.pointee = 1
+    // printDeviceAnchorState(deviceAnchor)
     
+    var frame : LayerRenderer.Frame?
+    if sess.currentFrame != nil {
+        frame = sess.currentFrame
+    } else {
+        frame = globalLayerRenderer!.queryNextFrame()
+        sess.currentFrame = frame
+    }
+    let drawable = frame!.queryDrawable()!
+    drawable.deviceAnchor = deviceAnchor
+    
+    let viewCount = drawable.views.count
+    viewCountOutput?.pointee = UInt32(viewCount)
+
     if let viewState = viewState {
         viewState.pointee.type = XR_TYPE_VIEW_STATE
         viewState.pointee.next = nil
         viewState.pointee.viewStateFlags = XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT
     }
-    
-    if viewCapacityInput < 1 {
-        print("xrLocateViews not enough input capacity but i waited around for an update like a pleb")
+
+    if viewCapacityInput < viewCount {
+        print("xrLocateViews not enough input capacity: required \(viewCount), got \(viewCapacityInput)")
         return XR_SUCCESS
     }
-    
-    // Populate the first view using the device anchor's transform.
-    // for two views we need to get the left and right eye view transform from the LayerRenderer.Drawable which is relative to deviceAnchor(and i guess you can't assume it wont change?)
+
     if let views = views {
-        views.pointee.type = XR_TYPE_VIEW
-        views.pointee.next = nil
-        
-        let transform = deviceAnchor.originFromAnchorTransform
-        let translation = transform.translation
-        let orientation = transform.orientation
-        
-        views.pointee.pose.position.x = translation.x
-        views.pointee.pose.position.y = translation.y
-        views.pointee.pose.position.z = translation.z
-        
-        views.pointee.pose.orientation.x = orientation.vector.x
-        views.pointee.pose.orientation.y = orientation.vector.y
-        views.pointee.pose.orientation.z = orientation.vector.z
-        views.pointee.pose.orientation.w = orientation.vector.w
-        
-        // i think these need to be calculated from the computeprojection call given a view
-        // but aspect ratio and clipping planes are missing when reducing the projection matrix to fovs https://developer.apple.com/documentation/compositorservices/layerrenderer/drawable/computeprojection(convention:viewindex:)
-        views.pointee.fov.angleLeft  = -0.5
-        views.pointee.fov.angleRight =  0.5
-        views.pointee.fov.angleUp    =  0.5
-        views.pointee.fov.angleDown  = -0.5
+        for i in 0..<viewCount {
+            // Get the local transform for this view.
+            let localMatrix = drawable.views[i].transform
+            // Compute the world transform by applying the device anchor.
+            let worldMatrix = (deviceAnchor.originFromAnchorTransform * localMatrix).inverse
+            let translation = worldMatrix.translation
+            let orientation = worldMatrix.orientation
+
+            // Populate the view structure for this index.
+            views[i].type = XR_TYPE_VIEW
+            views[i].next = nil
+            views[i].pose.position.x = translation.x
+            views[i].pose.position.y = translation.y
+            views[i].pose.position.z = translation.z
+            views[i].pose.orientation.x = orientation.vector.x
+            views[i].pose.orientation.y = orientation.vector.y
+            views[i].pose.orientation.z = orientation.vector.z
+            views[i].pose.orientation.w = orientation.vector.w
+
+            // i think these need to be calculated from the computeprojection call given a view
+            // but aspect ratio and clipping planes are missing when reducing the projection matrix to fovs https://developer.apple.com/documentation/compositorservices/layerrenderer/drawable/computeprojection(convention:viewindex:)
+            views[i].fov.angleLeft  = -0.5
+            views[i].fov.angleRight =  0.5
+            views[i].fov.angleUp    =  0.5
+            views[i].fov.angleDown  = -0.5
+        }
     }
-    
+    sess_ptr.pointee = sess
     return XR_SUCCESS
 }
 
+@_cdecl("xrBeginFrame")
+public func xrBeginFrame(_ session: XrSession,
+                         _ frameBeginInfo: UnsafePointer<XrFrameBeginInfo>?) -> XrResult {
+    print("xrBeginFrame called")
+    
+    let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>.self)
+    var sess = sess_ptr.pointee
+    
+    sess.currentFrame!.startSubmission()
+    return XR_SUCCESS
+}
+struct Vertex {
+    var position: SIMD2<Float>
+    var texCoord: SIMD2<Float>
+}
+
+func renderSwapchainTextureToDrawable(sess: Session) {
+    // Ensure we have a valid drawable.
+    guard let drawable = sess.currentFrame?.queryDrawable() else {
+        fatalError("Drawable not available")
+    }
+    
+    // Ensure device and command queue are available.
+    let device = sess.metalDevice
+    let commandQueue = sess.commandQueue
+    
+    // Create a full-screen quad covering NDC (-1..1)
+    let vertices: [Vertex] = [
+        Vertex(position: SIMD2(-1,  1), texCoord: SIMD2(0, 0)),
+        Vertex(position: SIMD2(-1, -1), texCoord: SIMD2(0, 1)),
+        Vertex(position: SIMD2( 1, -1), texCoord: SIMD2(1, 1)),
+        
+        Vertex(position: SIMD2(-1,  1), texCoord: SIMD2(0, 0)),
+        Vertex(position: SIMD2( 1, -1), texCoord: SIMD2(1, 1)),
+        Vertex(position: SIMD2( 1,  1), texCoord: SIMD2(1, 0))
+    ]
+    
+    // Create a vertex buffer.
+    guard let vertexBuffer = device.makeBuffer(bytes: vertices,
+                                               length: MemoryLayout<Vertex>.stride * vertices.count,
+                                               options: []) else {
+        fatalError("Could not create vertex buffer")
+    }
+    
+    var library: MTLLibrary?
+    // Embedded shader source to compile at runtime.
+    let shaderSource = """
+    #include <metal_stdlib>
+    using namespace metal;
+    
+    struct Vertex {
+        float2 position [[attribute(0)]];
+        float2 texCoord [[attribute(1)]];
+    };
+    
+    struct VertexOut {
+        float4 position [[position]];
+        float2 texCoord;
+    };
+    
+    vertex VertexOut vertexShader(uint vertexID [[vertex_id]],
+                                  const device Vertex* vertices [[buffer(0)]]) {
+        VertexOut out;
+        out.position = float4(vertices[vertexID].position, 0.0, 1.0);
+        out.texCoord = vertices[vertexID].texCoord;
+        return out;
+    }
+    
+    fragment float4 fragmentShader(VertexOut in [[stage_in]],
+                                   texture2d<float> colorTexture [[texture(0)]],
+                                   sampler samplr [[sampler(0)]]) {
+        return colorTexture.sample(samplr, in.texCoord);
+    }
+    """
+    do {
+        library = try device.makeLibrary(source: shaderSource, options: nil)
+    } catch {
+        fatalError("Failed to create library from source: \(error)")
+    }
+    
+    // Get the vertex and fragment functions.
+    guard let vertexFunction = library!.makeFunction(name: "vertexShader"),
+          let fragmentFunction = library!.makeFunction(name: "fragmentShader") else {
+        fatalError("Could not load shader functions")
+    }
+    
+    // Set up the render pipeline.
+    let pipelineDescriptor = MTLRenderPipelineDescriptor()
+    pipelineDescriptor.vertexFunction = vertexFunction
+    pipelineDescriptor.fragmentFunction = fragmentFunction
+    // colorattachments is given the output pixel format
+    pipelineDescriptor.colorAttachments[0].pixelFormat = drawable.colorTextures[0].pixelFormat
+    
+    let pipelineState: MTLRenderPipelineState
+    do {
+        pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    } catch {
+        fatalError("Failed to create pipeline state: \(error)")
+    }
+    
+    // Create a command buffer.
+    guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+        fatalError("Could not create command buffer")
+    }
+    // Create a render pass descriptor targeting the drawable's texture.
+    let renderPassDescriptor = MTLRenderPassDescriptor()
+    // renderpassdescriptor is given the output texture
+    renderPassDescriptor.colorAttachments[0].texture = drawable.colorTextures[0]
+    renderPassDescriptor.colorAttachments[0].loadAction = .clear
+    renderPassDescriptor.colorAttachments[0].storeAction = .store
+    renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
+    
+    // Create a render encoder.
+    guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+        fatalError("Could not create render encoder")
+    }
+    // convert our swapchain texture to a type2d
+    guard let singleTexture = sess.swapchain!.textures[0].__newTextureView(with: sess.swapchain!.textures[0].pixelFormat,
+                                                                            textureType: .type2D,
+                                                                            levels: NSRange(location: 0, length: 1),
+                                                                            slices: NSRange(location: 0, length: 1))
+    else {
+        fatalError("Failed to create texture view")
+    }
+    
+    // Set pipeline state, vertex buffer, and bind the swapchain texture.
+    renderEncoder.setRenderPipelineState(pipelineState)
+    renderEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+    // fragment texture is given the swapchain texture (the input i guess)
+    renderEncoder.setFragmentTexture(singleTexture, index: 0)
+    
+    // setup a texture sampler for when in and out are different sizes?
+    let samplerDescriptor = MTLSamplerDescriptor()
+    samplerDescriptor.minFilter = .linear
+    samplerDescriptor.magFilter = .linear
+    samplerDescriptor.sAddressMode = .clampToEdge
+    samplerDescriptor.tAddressMode = .clampToEdge
+
+    guard let samplerState = device.makeSamplerState(descriptor: samplerDescriptor) else {
+        fatalError("Failed to create sampler state")
+    }
+
+    renderEncoder.setFragmentSamplerState(samplerState, index: 0)
+    
+    // do it command
+    renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertices.count)
+    
+    renderEncoder.endEncoding()
+    
+    // submit and present?
+    drawable.encodePresent(commandBuffer: commandBuffer)
+    commandBuffer.commit()
+}
+
+@_cdecl("xrEndFrame")
+public func xrEndFrame(_ session: XrSession,
+                       _ frameEndInfo: UnsafePointer<XrFrameEndInfo>?) -> XrResult {
+    print("xrEndFrame called")
+    
+    let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>.self)
+    var sess = sess_ptr.pointee
+    
+    guard let info = frameEndInfo?.pointee else {
+        print("No frame end info provided")
+        return XR_SUCCESS
+    }
+    
+    renderSwapchainTextureToDrawable(sess: sess)
+    
+    sess.currentFrame!.endSubmission()
+    sess.currentFrame = nil
+    
+    sess_ptr.pointee = sess
+    
+    // here we need to submit everything
+    
+//    XR_DEFINE_HANDLE(XrSpace)
+    
+//    typedef XrFlags64 XrCompositionLayerFlags;
+//
+//    // Flag bits for XrCompositionLayerFlags
+//    static const XrCompositionLayerFlags XR_COMPOSITION_LAYER_CORRECT_CHROMATIC_ABERRATION_BIT = 0x00000001;
+//    static const XrCompositionLayerFlags XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT = 0x00000002;
+//    static const XrCompositionLayerFlags XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT = 0x00000004;
+//    static const XrCompositionLayerFlags XR_COMPOSITION_LAYER_INVERTED_ALPHA_BIT_EXT = 0x00000008;
+    
+//    typedef struct XR_MAY_ALIAS XrCompositionLayerBaseHeader {
+//        XrStructureType             type;
+//        const void* XR_MAY_ALIAS    next;
+//        XrCompositionLayerFlags     layerFlags;
+//        XrSpace                     space;
+//    } XrCompositionLayerBaseHeader;
+//
+//    typedef struct XrFrameEndInfo {
+//        XrStructureType                               type;
+//        const void* XR_MAY_ALIAS                      next;
+//        XrTime                                        displayTime;
+//        XrEnvironmentBlendMode                        environmentBlendMode;
+//        uint32_t                                      layerCount;
+//        const XrCompositionLayerBaseHeader* const*    layers;
+//    } XrFrameEndInfo;
+    
+//    print("Frame display time: \(info.displayTime)")
+//    print("Environment blend mode: \(info.environmentBlendMode)")
+//    print("Layer count: \(info.layerCount)")
+//
+//    if info.layerCount > 0, let layersPtr = info.layers {
+//        let layersBuffer = UnsafeBufferPointer(start: layersPtr, count: Int(info.layerCount))
+//        for (i, layerHeaderOpt) in layersBuffer.enumerated() {
+//            if let layerHeaderPtr = layerHeaderOpt {
+//                let layerHeader = layerHeaderPtr.pointee
+//                print("Layer \(i):")
+//                print("  Type: \(layerHeader.type)")
+//                print("  Next: \(String(describing: layerHeader.next))")
+//                print("  Layer flags: \(layerHeader.layerFlags)")
+//                print("  Space: \(layerHeader.space)")
+//            } else {
+//                print("Layer \(i) is nil")
+//            }
+//        }
+//    } else {
+//        print("No layers provided")
+//    }
+    
+    return XR_SUCCESS
+}
 @_cdecl("xrEnumerateApiLayerProperties")
 public func xrEnumerateApiLayerProperties(_ propertyCapacityInput: UInt32,
                                           _ propertyCountOutput: UnsafeMutablePointer<UInt32>?,
@@ -516,13 +864,6 @@ public func xrApplyHapticFeedback(_ session: XrSession,
 public func xrAttachSessionActionSets(_ session: XrSession,
                                       _ attachInfo: UnsafePointer<XrSessionActionSetsAttachInfo>?) -> XrResult {
     print("xrAttachSessionActionSets called")
-    return XR_SUCCESS
-}
-
-@_cdecl("xrBeginFrame")
-public func xrBeginFrame(_ session: XrSession,
-                         _ frameBeginInfo: UnsafePointer<XrFrameBeginInfo>?) -> XrResult {
-    print("xrBeginFrame called")
     return XR_SUCCESS
 }
 
@@ -652,68 +993,6 @@ public func xrDestroySpace(_ space: XrSpace) -> XrResult {
     return XR_SUCCESS
 }
 
-@_cdecl("xrEndFrame")
-public func xrEndFrame(_ session: XrSession,
-                       _ frameEndInfo: UnsafePointer<XrFrameEndInfo>?) -> XrResult {
-    print("xrEndFrame called")
-    
-    guard let info = frameEndInfo?.pointee else {
-        print("No frame end info provided")
-        return XR_SUCCESS
-    }
-    
-    // here we need to submit everything
-    
-//    XR_DEFINE_HANDLE(XrSpace)
-    
-//    typedef XrFlags64 XrCompositionLayerFlags;
-//
-//    // Flag bits for XrCompositionLayerFlags
-//    static const XrCompositionLayerFlags XR_COMPOSITION_LAYER_CORRECT_CHROMATIC_ABERRATION_BIT = 0x00000001;
-//    static const XrCompositionLayerFlags XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT = 0x00000002;
-//    static const XrCompositionLayerFlags XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT = 0x00000004;
-//    static const XrCompositionLayerFlags XR_COMPOSITION_LAYER_INVERTED_ALPHA_BIT_EXT = 0x00000008;
-    
-//    typedef struct XR_MAY_ALIAS XrCompositionLayerBaseHeader {
-//        XrStructureType             type;
-//        const void* XR_MAY_ALIAS    next;
-//        XrCompositionLayerFlags     layerFlags;
-//        XrSpace                     space;
-//    } XrCompositionLayerBaseHeader;
-//
-//    typedef struct XrFrameEndInfo {
-//        XrStructureType                               type;
-//        const void* XR_MAY_ALIAS                      next;
-//        XrTime                                        displayTime;
-//        XrEnvironmentBlendMode                        environmentBlendMode;
-//        uint32_t                                      layerCount;
-//        const XrCompositionLayerBaseHeader* const*    layers;
-//    } XrFrameEndInfo;
-    
-//    print("Frame display time: \(info.displayTime)")
-//    print("Environment blend mode: \(info.environmentBlendMode)")
-//    print("Layer count: \(info.layerCount)")
-//
-//    if info.layerCount > 0, let layersPtr = info.layers {
-//        let layersBuffer = UnsafeBufferPointer(start: layersPtr, count: Int(info.layerCount))
-//        for (i, layerHeaderOpt) in layersBuffer.enumerated() {
-//            if let layerHeaderPtr = layerHeaderOpt {
-//                let layerHeader = layerHeaderPtr.pointee
-//                print("Layer \(i):")
-//                print("  Type: \(layerHeader.type)")
-//                print("  Next: \(String(describing: layerHeader.next))")
-//                print("  Layer flags: \(layerHeader.layerFlags)")
-//                print("  Space: \(layerHeader.space)")
-//            } else {
-//                print("Layer \(i) is nil")
-//            }
-//        }
-//    } else {
-//        print("No layers provided")
-//    }
-    
-    return XR_SUCCESS
-}
 @_cdecl("xrEndSession")
 public func xrEndSession(_ session: XrSession) -> XrResult {
     print("xrEndSession called")
@@ -984,6 +1263,9 @@ public func xrCreateSwapchain(_ session: XrSession,
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     
+    let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>.self)
+    let sess = sess_ptr.pointee
+    
     // here we're just allocating some MTLTexture manually cause thats the correct type. if it was done this way, in endframe you would copy over the texture data into the final texture.
     
     // I think the best way to support this is to get all the queryNextFrame()s, save their texture pointer so we can return an array of textures from enumerate, then release them all
@@ -1004,8 +1286,6 @@ public func xrCreateSwapchain(_ session: XrSession,
                         .pixelFormatView]
     descriptor.textureType = .type2DArray
     
-    let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>.self)
-    let sess = sess_ptr.pointee
     
     var textures: [MTLTexture] = []
     for _ in 0..<textureCount {
@@ -1015,6 +1295,7 @@ public func xrCreateSwapchain(_ session: XrSession,
     }
     
     let swapchain = Swapchain(textures: textures)
+    sess_ptr.pointee.swapchain = swapchain
     swapchainOut.pointee = OpaquePointer(Unmanaged.passRetained(swapchain).toOpaque())
     return XR_SUCCESS
 }
