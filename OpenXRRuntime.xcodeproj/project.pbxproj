@@ -6,11 +6,35 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXAggregateTarget section */
+		1232853C2D7BA9D500907F75 /* XCFrameworkBuilder */ = {
+			isa = PBXAggregateTarget;
+			buildConfigurationList = 1232853D2D7BA9D500907F75 /* Build configuration list for PBXAggregateTarget "XCFrameworkBuilder" */;
+			buildPhases = (
+				123285402D7BA9F600907F75 /* Run Script */,
+			);
+			dependencies = (
+				123285422D7BAA2100907F75 /* PBXTargetDependency */,
+			);
+			name = XCFrameworkBuilder;
+			packageProductDependencies = (
+			);
+			productName = XCFrameworkBuilder;
+		};
+/* End PBXAggregateTarget section */
+
 /* Begin PBXBuildFile section */
 		12B25F782D72572E008F05B9 /* OpenXRRuntime.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 12B25F6C2D72572E008F05B9 /* OpenXRRuntime.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		123285412D7BAA2100907F75 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 12B25F632D72572E008F05B9 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 12B25F6B2D72572E008F05B9;
+			remoteInfo = OpenXRRuntime;
+		};
 		12B25F792D72572E008F05B9 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 12B25F632D72572E008F05B9 /* Project object */;
@@ -20,45 +44,34 @@
 		};
 /* End PBXContainerItemProxy section */
 
-/* Begin PBXCopyFilesBuildPhase section */
-		128879252D77C295000D2CAB /* CopyFiles */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = Modules/openxr;
-			dstSubfolderSpec = 7;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXCopyFilesBuildPhase section */
-
 /* Begin PBXFileReference section */
+		12900B792D7C86160007D8FC /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		12B25F6C2D72572E008F05B9 /* OpenXRRuntime.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = OpenXRRuntime.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		12B25F772D72572E008F05B9 /* OpenXRRuntimeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OpenXRRuntimeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
-		1288792E2D77C2A8000D2CAB /* Exceptions for "OpenXRRuntime" folder in "Copy Files" phase from "OpenXRRuntime" target */ = {
-			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
-			buildPhase = 128879252D77C295000D2CAB /* CopyFiles */;
-			membershipExceptions = (
-				openxr/module.modulemap,
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		1268CE852D7C7C060059AD29 /* Exceptions for "OpenXRRuntime" folder in "OpenXRRuntime" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			publicHeaders = (
 				openxr/openxr_loader_negotiation.h,
 				openxr/openxr_platform_defines.h,
 				openxr/openxr_platform.h,
 				openxr/openxr_reflection_parent_structs.h,
 				openxr/openxr_reflection_structs.h,
 				openxr/openxr_reflection.h,
+				openxr/openxr_wrapper.h,
 				openxr/openxr.h,
 			);
+			target = 12B25F6B2D72572E008F05B9 /* OpenXRRuntime */;
 		};
-/* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		12B25F6E2D72572E008F05B9 /* OpenXRRuntime */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				1288792E2D77C2A8000D2CAB /* Exceptions for "OpenXRRuntime" folder in "Copy Files" phase from "OpenXRRuntime" target */,
+				1268CE852D7C7C060059AD29 /* Exceptions for "OpenXRRuntime" folder in "OpenXRRuntime" target */,
 			);
 			path = OpenXRRuntime;
 			sourceTree = "<group>";
@@ -95,6 +108,7 @@
 				12B25F6E2D72572E008F05B9 /* OpenXRRuntime */,
 				12B25F7B2D72572E008F05B9 /* OpenXRRuntimeTests */,
 				12B25F6D2D72572E008F05B9 /* Products */,
+				12900B792D7C86160007D8FC /* module.modulemap */,
 			);
 			sourceTree = "<group>";
 		};
@@ -128,7 +142,6 @@
 				12B25F682D72572E008F05B9 /* Sources */,
 				12B25F692D72572E008F05B9 /* Frameworks */,
 				12B25F6A2D72572E008F05B9 /* Resources */,
-				128879252D77C295000D2CAB /* CopyFiles */,
 			);
 			buildRules = (
 			);
@@ -177,6 +190,9 @@
 				LastSwiftUpdateCheck = 1630;
 				LastUpgradeCheck = 1630;
 				TargetAttributes = {
+					1232853C2D7BA9D500907F75 = {
+						CreatedOnToolsVersion = 16.3;
+					};
 					12B25F6B2D72572E008F05B9 = {
 						CreatedOnToolsVersion = 16.3;
 					};
@@ -201,6 +217,7 @@
 			targets = (
 				12B25F6B2D72572E008F05B9 /* OpenXRRuntime */,
 				12B25F762D72572E008F05B9 /* OpenXRRuntimeTests */,
+				1232853C2D7BA9D500907F75 /* XCFrameworkBuilder */,
 			);
 		};
 /* End PBXProject section */
@@ -222,6 +239,29 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		123285402D7BA9F600907F75 /* Run Script */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${BUILD_DIR}/${CONFIGURATION}-xrsimulator/OpenXRRuntime.framework/*",
+				"${BUILD_DIR}/${CONFIGURATION}-xros/OpenXRRuntime.framework/*",
+			);
+			name = "Run Script";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Paths to your device and simulator builds.\nDEVICE_FRAMEWORK_PATH=\"${BUILD_DIR}/${CONFIGURATION}-xros/OpenXRRuntime.framework\"\nSIMULATOR_FRAMEWORK_PATH=\"${BUILD_DIR}/${CONFIGURATION}-xrsimulator/OpenXRRuntime.framework\"\nXCFRAMEWORK_OUTPUT_PATH=\"${BUILD_DIR}/OpenVision.xcframework\"\n\n# Create the XCFramework.\nxcodebuild -create-xcframework \\\n  -framework \"$DEVICE_FRAMEWORK_PATH\" \\\n  -framework \"$SIMULATOR_FRAMEWORK_PATH\" \\\n  -output \"$XCFRAMEWORK_OUTPUT_PATH\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		12B25F682D72572E008F05B9 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -240,6 +280,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		123285422D7BAA2100907F75 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 12B25F6B2D72572E008F05B9 /* OpenXRRuntime */;
+			targetProxy = 123285412D7BAA2100907F75 /* PBXContainerItemProxy */;
+		};
 		12B25F7A2D72572E008F05B9 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 12B25F6B2D72572E008F05B9 /* OpenXRRuntime */;
@@ -248,6 +293,26 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		1232853E2D7BA9D500907F75 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 54KYVB5Y5C;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Debug;
+		};
+		1232853F2D7BA9D500907F75 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 54KYVB5Y5C;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Release;
+		};
 		12B25F7E2D72572E008F05B9 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -274,7 +339,7 @@
 				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
 				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
 				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
-				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = NO;
 				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
 				CLANG_WARN_STRICT_PROTOTYPES = YES;
 				CLANG_WARN_SUSPICIOUS_MOVE = YES;
@@ -305,14 +370,15 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/openxr";
+				HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/OpenXRRuntime/openxr";
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MODULEMAP_FILE = "$(PROJECT_DIR)/module.modulemap";
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = xros;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
-				SWIFT_INCLUDE_PATHS = "$(PROJECT_DIR)/openxr";
+				SWIFT_INCLUDE_PATHS = "$(PROJECT_DIR)/OpenXRRuntime/openxr";
 				SWIFT_OBJC_BRIDGING_HEADER = "";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				UNEXPORTED_SYMBOLS_FILE = "";
@@ -349,7 +415,7 @@
 				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
 				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
 				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
-				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = NO;
 				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
 				CLANG_WARN_STRICT_PROTOTYPES = YES;
 				CLANG_WARN_SUSPICIOUS_MOVE = YES;
@@ -376,14 +442,15 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/openxr";
+				HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/OpenXRRuntime/openxr";
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MODULEMAP_FILE = "$(PROJECT_DIR)/module.modulemap";
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = xros;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "";
 				SWIFT_COMPILATION_MODE = wholemodule;
-				SWIFT_INCLUDE_PATHS = "$(PROJECT_DIR)/openxr";
+				SWIFT_INCLUDE_PATHS = "$(PROJECT_DIR)/OpenXRRuntime/openxr";
 				SWIFT_OBJC_BRIDGING_HEADER = "";
 				UNEXPORTED_SYMBOLS_FILE = "";
 				USER_HEADER_SEARCH_PATHS = "";
@@ -398,17 +465,22 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
+				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEFINES_MODULE = NO;
-				DEVELOPMENT_ASSET_PATHS = OpenXRRuntime/openxr;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = 54KYVB5Y5C;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				DYLIB_INSTALL_NAME_BASE = "@rpath";
-				ENABLE_MODULE_VERIFIER = YES;
+				ENABLE_MODULE_VERIFIER = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/OpenXRRuntime/openxr";
+				HEADER_SEARCH_PATHS = (
+					"$(PROJECT_DIR)",
+					"$(PROJECT_DIR)/OpenXRRuntime",
+				);
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -417,6 +489,7 @@
 					"@loader_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
+				MODULEMAP_FILE = "$(PROJECT_DIR)/module.modulemap";
 				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
 				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
 				PRODUCT_BUNDLE_IDENTIFIER = com.jam.OpenXRRuntime;
@@ -424,7 +497,7 @@
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "xros xrsimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_INCLUDE_PATHS = "$(PROJECT_DIR)/OpenXRRuntime/openxr";
+				SWIFT_INCLUDE_PATHS = "$(PROJECT_DIR)/OpenXRRuntime $(PROJECT_DIR)";
 				SWIFT_INSTALL_MODULE = YES;
 				SWIFT_INSTALL_OBJC_HEADER = NO;
 				SWIFT_OBJC_BRIDGING_HEADER = "";
@@ -437,17 +510,22 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
+				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEFINES_MODULE = NO;
-				DEVELOPMENT_ASSET_PATHS = OpenXRRuntime/openxr;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = 54KYVB5Y5C;
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				DYLIB_INSTALL_NAME_BASE = "@rpath";
-				ENABLE_MODULE_VERIFIER = YES;
+				ENABLE_MODULE_VERIFIER = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(PROJECT_DIR)/OpenXRRuntime/openxr";
+				HEADER_SEARCH_PATHS = (
+					"$(PROJECT_DIR)",
+					"$(PROJECT_DIR)/OpenXRRuntime",
+				);
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -456,14 +534,16 @@
 					"@loader_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
+				MODULEMAP_FILE = "$(PROJECT_DIR)/module.modulemap";
 				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
 				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.jam.OpenXRRuntime;
 				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "xros xrsimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_INCLUDE_PATHS = "$(PROJECT_DIR)/OpenXRRuntime/openxr";
+				SWIFT_INCLUDE_PATHS = "$(PROJECT_DIR)/OpenXRRuntime $(PROJECT_DIR)";
 				SWIFT_INSTALL_MODULE = YES;
 				SWIFT_INSTALL_OBJC_HEADER = NO;
 				SWIFT_OBJC_BRIDGING_HEADER = "";
@@ -509,6 +589,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		1232853D2D7BA9D500907F75 /* Build configuration list for PBXAggregateTarget "XCFrameworkBuilder" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1232853E2D7BA9D500907F75 /* Debug */,
+				1232853F2D7BA9D500907F75 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		12B25F662D72572E008F05B9 /* Build configuration list for PBXProject "OpenXRRuntime" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

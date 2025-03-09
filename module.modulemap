@@ -1,0 +1,10 @@
+framework module OpenXRRuntime {
+    export *
+
+    module OpenXR [system] {
+        // TODO figure out how to get this working with relative paths
+        umbrella header "/Users/jamus/OpenXRRuntime/OpenXRRuntime/openxr/openxr.h"
+        export *
+    }
+}
+
