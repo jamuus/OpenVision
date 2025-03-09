@@ -1,12 +1,9 @@
-//import Foundation
-//import RealityKit
 import ARKit
 // contains "openxr.h" from the official sdk
-import OpenXR
+import OpenXRRuntime.OpenXR
 import Darwin // For strncpy
 import SwiftUI
 import CompositorServices
-//import AppDelegate
 
 // MARK: - OpenXR Function Pointer Type Aliases
 
@@ -235,7 +232,9 @@ struct MetalLayerConfiguration: CompositorLayerConfiguration {
         // However, since we use vertex amplification to implement shared rendering, it won't work on the simulator in this project.
         configuration.layout = supportedLayouts.contains(.layered) ? .layered : .dedicated
         print("layout: \(configuration.layout)")
+        
         configuration.isFoveationEnabled = supportsFoveation
+        
         print("supportsFoveation: \(supportsFoveation)")
         configuration.colorFormat = .rgba16Float
     }
@@ -268,6 +267,7 @@ public struct OpenXRScene: Scene {
             CompositorLayer(configuration: MetalLayerConfiguration()) { layerRenderer in
                 onLayerRendererReceived?(layerRenderer)
                 globalLayerRenderer = layerRenderer
+                print("entered immersive space")
             }
         }
         .immersionStyle(selection: $immersionStyle, in: .mixed, .full)
@@ -322,19 +322,19 @@ struct ContentView: View {
     }
 }
 
-var globalLayerRenderer: LayerRenderer? = nil
+nonisolated(unsafe) var globalLayerRenderer: LayerRenderer? = nil
 
 // MARK: openxr impl
-struct Instance {
+class Instance {
     var eventQueue: [Event] = []
-    var session: UnsafeMutablePointer<Session>? // just one session for now (mutable pointer cause
+    var session: UnsafeMutablePointer<Session>? // just one session for now
     let metalDevice: MTLDevice = MTLCreateSystemDefaultDevice()!
     
-    mutating func enqueueEvent(_ event: Event) {
+     func enqueueEvent(_ event: Event) {
         eventQueue.append(event)
     }
     
-    mutating func dequeueEvent() -> Event? {
+     func dequeueEvent() -> Event? {
         if eventQueue.isEmpty {
             return nil
         }
@@ -363,21 +363,38 @@ enum Event {
     }
 }
 
-struct Session {
+class Session {
     let metalDevice: MTLDevice
     let arSession: ARKitSession
     var worldTrackingProvider: WorldTrackingProvider
     var commandQueue : MTLCommandQueue
     
-    var currentFrame: LayerRenderer.Frame?
+    init(
+        metalDevice: MTLDevice,
+        arSession: ARKitSession,
+        worldTrackingProvider: WorldTrackingProvider,
+        commandQueue: MTLCommandQueue) {
+            self.metalDevice = metalDevice
+            self.arSession = arSession
+            self.worldTrackingProvider = worldTrackingProvider
+            self.commandQueue = commandQueue
+    }
+    
     var swapchain: Swapchain?
+    var renderer: Renderer?
+    var timing: LayerRenderer.Frame.Timing?
+    var currentFrame: LayerRenderer.Frame?
 }
 
 class Swapchain {
     var textures: [MTLTexture]
+    // TODO clock for waiting
+    var waiter: LayerRenderer.Clock?
+    var session: Session
     
-    init(textures: [MTLTexture]) {
+    init(textures: [MTLTexture], session: Session) {
         self.textures = textures
+        self.session = session
     }
 }
 
@@ -425,11 +442,53 @@ public func xrCreateSession(_ instance: XrInstance,
     }
     
     inst.session = UnsafeMutablePointer<Session>.allocate(capacity: 1)
-    inst.session!.initialize(to: Session(metalDevice: inst.metalDevice, arSession: ARKitSession(), worldTrackingProvider: WorldTrackingProvider(), commandQueue: inst.metalDevice.makeCommandQueue()!))
+    inst.session!.initialize(to: Session(
+        metalDevice: inst.metalDevice,
+        arSession: ARKitSession(),
+        worldTrackingProvider: WorldTrackingProvider(),
+        commandQueue: inst.metalDevice.makeCommandQueue()!
+    ))
+    
     
     let session = inst.session?.pointee
+    session?.commandQueue.label = "openxr command queue"
     
-    inst.enqueueEvent(Event.sessionStateChanged(state:XR_SESSION_STATE_READY))
+    // maybe this should be in beginframe?
+//    let semaphore = DispatchSemaphore(value: 0)
+    Task {
+        do {
+            print("WorldTrackingProvider:")
+            print("\trequired authorizations: \(WorldTrackingProvider.requiredAuthorizations)")
+            print("\tsupported: \(WorldTrackingProvider.isSupported)")
+            print("\tstate: \(session!.worldTrackingProvider.state)")
+            
+            let dataProviders: [DataProvider] = [session!.worldTrackingProvider]
+            try await session!.arSession.run(dataProviders)
+            print("waiting for worldTrackingProvider to be running")
+            while (true) {
+                guard session!.worldTrackingProvider.state != .running else { break }
+            }
+            print("waiting for valid device anchor")
+            while(true) {
+                let timestamp = CACurrentMediaTime()
+                guard let deviceAnchor = session!.worldTrackingProvider.queryDeviceAnchor(atTimestamp: timestamp) else {
+                    print("No device anchor available")
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                    continue
+                }
+                break
+            }
+            
+            inst.enqueueEvent(Event.sessionStateChanged(state:XR_SESSION_STATE_READY))
+            print("worldTrackingProvider run returned without error")
+        } catch {
+            fatalError("Failed to run ARSession")
+        }
+//        semaphore.signal()
+    }
+//    semaphore.wait()
+    
+    // TODO do this once device anchor is ready
     inst_ptr.pointee = inst
     
     inst.session?.pointee = session!
@@ -451,6 +510,46 @@ func printDeviceAnchorState(_ anchor: DeviceAnchor) {
     print("Origin From Anchor Transform:")
     print("  Translation: \(translation)")
     print("  Orientation: \(orientation)")
+}
+
+
+@_cdecl("xrWaitFrame")
+public func xrWaitFrame(_ session: XrSession,
+                        _ frameWaitInfo: UnsafePointer<XrFrameWaitInfo>?,
+                        _ frameState: UnsafeMutablePointer<XrFrameState>?) -> XrResult {
+
+    guard let frameState = frameState else {
+        return XR_ERROR_FUNCTION_UNSUPPORTED
+    }
+    print("xrWaitFrame")
+    let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>?.self)
+    var sess = sess_ptr?.pointee
+    
+    
+    var frame : LayerRenderer.Frame?
+    if sess!.currentFrame != nil {
+        print("currentframe shouldn't be non nil")
+        frame = sess!.currentFrame
+        // TODO error?
+    } else {
+        frame = globalLayerRenderer!.queryNextFrame()
+        sess!.currentFrame = frame
+    }
+    sess_ptr!.pointee = sess!
+    
+    sess_ptr!.pointee.timing = frame!.predictTiming()!
+    let deadline = sess_ptr!.pointee.timing!.presentationTime
+    
+    let (seconds, attoseconds) = LayerRenderer.Clock.Instant.epoch.duration(to: deadline).components
+    let deadlineNanos: Int64 = Int64(seconds) * 1_000_000_000 + Int64(attoseconds / 1_000_000_000)
+    
+    frameState.pointee.type = XR_TYPE_FRAME_STATE
+    frameState.pointee.next = nil
+    
+    frameState.pointee.predictedDisplayTime = deadlineNanos
+    frameState.pointee.predictedDisplayPeriod = Int64(1e9/90) // TODO get from somewhere?
+    frameState.pointee.shouldRender = 1 // TODO would be set to 0 if window is minimised or something
+    return XR_SUCCESS
 }
 
 // basic sequence of events seem to be:
@@ -480,23 +579,10 @@ public func xrLocateViews(_ session: XrSession,
     print("xrLocateViews called")
     
     let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>.self)
-    var sess = sess_ptr.pointee
+    let sess = sess_ptr.pointee
     
-    // maybe this should be in beginframe?
-    let semaphore = DispatchSemaphore(value: 0)
-    Task {
-        do {
-            let dataProviders: [DataProvider] = [sess.worldTrackingProvider]
-            try await sess.arSession.run(dataProviders)
-        } catch {
-            fatalError("Failed to run ARSession")
-        }
-        semaphore.signal()
-    }
     
-    semaphore.wait()
-    
-    let timestamp = Date().timeIntervalSince1970
+    let timestamp = CACurrentMediaTime()
     guard let deviceAnchor = sess.worldTrackingProvider.queryDeviceAnchor(atTimestamp: timestamp) else {
         print("No device anchor available")
         return XR_ERROR_RUNTIME_FAILURE
@@ -506,15 +592,8 @@ public func xrLocateViews(_ session: XrSession,
         return XR_ERROR_RUNTIME_FAILURE
     }
     // printDeviceAnchorState(deviceAnchor)
-    
-    var frame : LayerRenderer.Frame?
-    if sess.currentFrame != nil {
-        frame = sess.currentFrame
-    } else {
-        frame = globalLayerRenderer!.queryNextFrame()
-        sess.currentFrame = frame
-    }
-    let drawable = frame!.queryDrawable()!
+
+    let drawable = sess.currentFrame!.queryDrawable()!
     drawable.deviceAnchor = deviceAnchor
     
     let viewCount = drawable.views.count
@@ -528,15 +607,16 @@ public func xrLocateViews(_ session: XrSession,
 
     if viewCapacityInput < viewCount {
         print("xrLocateViews not enough input capacity: required \(viewCount), got \(viewCapacityInput)")
-        return XR_SUCCESS
+        return XR_ERROR_RUNTIME_FAILURE
     }
 
     if let views = views {
         for i in 0..<viewCount {
             // Get the local transform for this view.
             let localMatrix = drawable.views[i].transform
+            
             // Compute the world transform by applying the device anchor.
-            let worldMatrix = (deviceAnchor.originFromAnchorTransform * localMatrix).inverse
+            let worldMatrix = (deviceAnchor.originFromAnchorTransform * localMatrix)
             let translation = worldMatrix.translation
             let orientation = worldMatrix.orientation
 
@@ -551,12 +631,16 @@ public func xrLocateViews(_ session: XrSession,
             views[i].pose.orientation.z = orientation.vector.z
             views[i].pose.orientation.w = orientation.vector.w
 
-            // i think these need to be calculated from the computeprojection call given a view
-            // but aspect ratio and clipping planes are missing when reducing the projection matrix to fovs https://developer.apple.com/documentation/compositorservices/layerrenderer/drawable/computeprojection(convention:viewindex:)
-            views[i].fov.angleLeft  = -0.5
-            views[i].fov.angleRight =  0.5
-            views[i].fov.angleUp    =  0.5
-            views[i].fov.angleDown  = -0.5
+            
+            let projection = drawable.computeProjection(viewIndex: i)
+            // i hope this is right
+            let fovX = 2 * atan(1.0 / projection.columns.0.x) // horizontal FOV in radians
+            let fovY = 2 * atan(1.0 / projection.columns.1.y) // vertical FOV in radians
+
+            views[i].fov.angleLeft  = -fovX / 2.0
+            views[i].fov.angleRight =  fovX / 2.0
+            views[i].fov.angleUp    =  fovY / 2.0
+            views[i].fov.angleDown  = -fovY / 2.0
         }
     }
     sess_ptr.pointee = sess
@@ -570,26 +654,32 @@ public func xrBeginFrame(_ session: XrSession,
     
     let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>.self)
     var sess = sess_ptr.pointee
+    sess.currentFrame!.startUpdate()
+//    print("\(sess.currentFrame) startUpdate")
     
-    sess.currentFrame!.startSubmission()
+    print("startupdate \(Unmanaged.passUnretained(sess).toOpaque())->\(sess.currentFrame)")
+    
+    sess_ptr.pointee = sess
     return XR_SUCCESS
 }
 struct Vertex {
     var position: SIMD2<Float>
     var texCoord: SIMD2<Float>
 }
+struct Renderer {
+    let vertexBuffer: MTLBuffer
+    let vertexCount: Int
+    let pipelineState: MTLRenderPipelineState
+    let samplerState: MTLSamplerState
+    let commandQueue: MTLCommandQueue
+}
 
-func renderSwapchainTextureToDrawable(sess: Session) {
-    // Ensure we have a valid drawable.
-    guard let drawable = sess.currentFrame?.queryDrawable() else {
-        fatalError("Drawable not available")
-    }
-    
-    // Ensure device and command queue are available.
-    let device = sess.metalDevice
-    let commandQueue = sess.commandQueue
-    
-    // Create a full-screen quad covering NDC (-1..1)
+// Sets up the reusable renderer resources.
+// It creates the vertex buffer, compiles the shaders from source, sets up the render pipeline,
+// and creates a sampler state.
+// Note: The pixel format is provided so that the pipeline matches the drawable's output format.
+func setupRenderer(device: MTLDevice, pixelFormat: MTLPixelFormat) -> Renderer {
+    // Create a full-screen quad covering NDC (-1..1).
     let vertices: [Vertex] = [
         Vertex(position: SIMD2(-1,  1), texCoord: SIMD2(0, 0)),
         Vertex(position: SIMD2(-1, -1), texCoord: SIMD2(0, 1)),
@@ -599,15 +689,15 @@ func renderSwapchainTextureToDrawable(sess: Session) {
         Vertex(position: SIMD2( 1, -1), texCoord: SIMD2(1, 1)),
         Vertex(position: SIMD2( 1,  1), texCoord: SIMD2(1, 0))
     ]
+    let vertexCount = vertices.count
     
-    // Create a vertex buffer.
+    // Create the vertex buffer.
     guard let vertexBuffer = device.makeBuffer(bytes: vertices,
                                                length: MemoryLayout<Vertex>.stride * vertices.count,
                                                options: []) else {
         fatalError("Could not create vertex buffer")
     }
     
-    var library: MTLLibrary?
     // Embedded shader source to compile at runtime.
     let shaderSource = """
     #include <metal_stdlib>
@@ -632,11 +722,13 @@ func renderSwapchainTextureToDrawable(sess: Session) {
     }
     
     fragment float4 fragmentShader(VertexOut in [[stage_in]],
-                                   texture2d<float> colorTexture [[texture(0)]],
+                                   texture2d_array<float> colorTexture [[texture(0)]],
                                    sampler samplr [[sampler(0)]]) {
-        return colorTexture.sample(samplr, in.texCoord);
+        // Sample from slice 0 of the texture array.
+        return colorTexture.sample(samplr, in.texCoord, 0);
     }
     """
+    let library: MTLLibrary
     do {
         library = try device.makeLibrary(source: shaderSource, options: nil)
     } catch {
@@ -644,17 +736,16 @@ func renderSwapchainTextureToDrawable(sess: Session) {
     }
     
     // Get the vertex and fragment functions.
-    guard let vertexFunction = library!.makeFunction(name: "vertexShader"),
-          let fragmentFunction = library!.makeFunction(name: "fragmentShader") else {
+    guard let vertexFunction = library.makeFunction(name: "vertexShader"),
+          let fragmentFunction = library.makeFunction(name: "fragmentShader") else {
         fatalError("Could not load shader functions")
     }
     
-    // Set up the render pipeline.
+    // Set up the render pipeline descriptor.
     let pipelineDescriptor = MTLRenderPipelineDescriptor()
     pipelineDescriptor.vertexFunction = vertexFunction
     pipelineDescriptor.fragmentFunction = fragmentFunction
-    // colorattachments is given the output pixel format
-    pipelineDescriptor.colorAttachments[0].pixelFormat = drawable.colorTextures[0].pixelFormat
+    pipelineDescriptor.colorAttachments[0].pixelFormat = pixelFormat
     
     let pipelineState: MTLRenderPipelineState
     do {
@@ -663,57 +754,55 @@ func renderSwapchainTextureToDrawable(sess: Session) {
         fatalError("Failed to create pipeline state: \(error)")
     }
     
-    // Create a command buffer.
-    guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-        fatalError("Could not create command buffer")
-    }
-    // Create a render pass descriptor targeting the drawable's texture.
-    let renderPassDescriptor = MTLRenderPassDescriptor()
-    // renderpassdescriptor is given the output texture
-    renderPassDescriptor.colorAttachments[0].texture = drawable.colorTextures[0]
-    renderPassDescriptor.colorAttachments[0].loadAction = .clear
-    renderPassDescriptor.colorAttachments[0].storeAction = .store
-    renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
-    
-    // Create a render encoder.
-    guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-        fatalError("Could not create render encoder")
-    }
-    // convert our swapchain texture to a type2d
-    guard let singleTexture = sess.swapchain!.textures[0].__newTextureView(with: sess.swapchain!.textures[0].pixelFormat,
-                                                                            textureType: .type2D,
-                                                                            levels: NSRange(location: 0, length: 1),
-                                                                            slices: NSRange(location: 0, length: 1))
-    else {
-        fatalError("Failed to create texture view")
-    }
-    
-    // Set pipeline state, vertex buffer, and bind the swapchain texture.
-    renderEncoder.setRenderPipelineState(pipelineState)
-    renderEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-    // fragment texture is given the swapchain texture (the input i guess)
-    renderEncoder.setFragmentTexture(singleTexture, index: 0)
-    
-    // setup a texture sampler for when in and out are different sizes?
+    // Set up a texture sampler.
     let samplerDescriptor = MTLSamplerDescriptor()
     samplerDescriptor.minFilter = .linear
     samplerDescriptor.magFilter = .linear
     samplerDescriptor.sAddressMode = .clampToEdge
     samplerDescriptor.tAddressMode = .clampToEdge
-
     guard let samplerState = device.makeSamplerState(descriptor: samplerDescriptor) else {
         fatalError("Failed to create sampler state")
     }
-
-    renderEncoder.setFragmentSamplerState(samplerState, index: 0)
     
-    // do it command
-    renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertices.count)
+    return Renderer(vertexBuffer: vertexBuffer,
+                    vertexCount: vertexCount,
+                    pipelineState: pipelineState,
+                    samplerState: samplerState,
+                    commandQueue: device.makeCommandQueue()!)
+}
+func drawSwapchainTextureToDrawable(renderer: Renderer,
+                                    input: MTLTexture,
+                                    output: LayerRenderer.Drawable) {
+    
+    guard let commandBuffer = renderer.commandQueue.makeCommandBuffer() else {
+        fatalError("Could not create command buffer")
+    }
+    commandBuffer.label = "openxr texture to layer renderer"
+    
+//    print("drawable \(output.colorTextures[0].width),\(output.colorTextures[0].height)")
+    // Create a render pass descriptor targeting the drawable's texture.
+    let renderPassDescriptor = MTLRenderPassDescriptor()
+    renderPassDescriptor.colorAttachments[0].texture = output.colorTextures[0]
+    renderPassDescriptor.colorAttachments[0].loadAction = .clear
+    renderPassDescriptor.colorAttachments[0].storeAction = .store
+    renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
+    
+    guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+        fatalError("Could not create render encoder")
+    }
+    
+    renderEncoder.setRenderPipelineState(renderer.pipelineState)
+    renderEncoder.setVertexBuffer(renderer.vertexBuffer, offset: 0, index: 0)
+    renderEncoder.setFragmentTexture(input, index: 0)
+    renderEncoder.setFragmentSamplerState(renderer.samplerState, index: 0)
+    
+    // Draw the full-screen quad.
+    renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: renderer.vertexCount)
     
     renderEncoder.endEncoding()
     
-    // submit and present?
-    drawable.encodePresent(commandBuffer: commandBuffer)
+    // Present the drawable and commit the command buffer.
+    output.encodePresent(commandBuffer: commandBuffer)
     commandBuffer.commit()
 }
 
@@ -729,15 +818,25 @@ public func xrEndFrame(_ session: XrSession,
         print("No frame end info provided")
         return XR_SUCCESS
     }
+    guard let drawable = sess.currentFrame?.queryDrawable() else {
+        fatalError("Drawable not available")
+    }
+    // TODO skip this if stuff there was previously an error
     
-    renderSwapchainTextureToDrawable(sess: sess)
+    if sess.renderer == nil {
+        // ideally done earlier but gotta get pixel format
+        sess.renderer = setupRenderer(
+            device: sess.metalDevice,
+            pixelFormat: drawable.colorTextures[0].pixelFormat)
+    }
+    drawSwapchainTextureToDrawable(
+        renderer: sess.renderer!,
+        input: sess.swapchain!.textures[0], output: drawable)
     
     sess.currentFrame!.endSubmission()
     sess.currentFrame = nil
     
     sess_ptr.pointee = sess
-    
-    // here we need to submit everything
     
 //    XR_DEFINE_HANDLE(XrSpace)
     
@@ -1026,12 +1125,20 @@ public func xrEnumerateViewConfigurations(_ instance: XrInstance,
                                           _ viewConfigurationTypeCapacityInput: UInt32,
                                           _ viewConfigurationTypeCountOutput: UnsafeMutablePointer<UInt32>?,
                                           _ viewConfigurationTypes: UnsafeMutablePointer<XrViewConfigurationType>?) -> XrResult {
+    print("xrEnumerateViewConfigurations")
+    // TODO enumerate from getdrawable()(i think)
+#if targetEnvironment(simulator)
     viewConfigurationTypeCountOutput?.pointee = 1
+#else
+    viewConfigurationTypeCountOutput?.pointee = 2
+#endif
     if viewConfigurationTypeCapacityInput < 1 {
         return XR_SUCCESS
     }
     if let viewConfigurationTypes = viewConfigurationTypes {
-        viewConfigurationTypes.pointee = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MONO
+        for i in 0..<Int(viewConfigurationTypeCountOutput!.pointee) {
+            viewConfigurationTypes[i] = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO
+        }
     }
     return XR_SUCCESS
 }
@@ -1043,16 +1150,31 @@ public func xrEnumerateViewConfigurationViews(_ instance: XrInstance,
                                               _ viewCapacityInput: UInt32,
                                               _ viewCountOutput: UnsafeMutablePointer<UInt32>?,
                                               _ views: UnsafeMutablePointer<XrViewConfigurationView>?) -> XrResult {
+    // TODO runtime
+#if targetEnvironment(simulator)
     viewCountOutput?.pointee = 1
+#else
+    viewCountOutput?.pointee = 2
+#endif
+    
     if viewCapacityInput < 1 {
         return XR_SUCCESS
     }
+    
+//    let inst_ptr = unsafeBitCast(instance, to: UnsafeMutablePointer<Instance>.self)
+//    var inst = inst_ptr.pointee
+//    let numViews = globalLayerRenderer!.properties.viewCount
+//    let texType = globalLayerRenderer!.properties.textureTopologies[0].textureType
+    
     if let views = views {
-        views.pointee.type = XR_TYPE_VIEW_CONFIGURATION_VIEW
-        views.pointee.next = nil
-        views.pointee.recommendedImageRectWidth = 1024
-        views.pointee.recommendedImageRectHeight = 768
-        views.pointee.recommendedSwapchainSampleCount = 4
+        for i in 0..<Int(viewCountOutput!.pointee) {
+            views[i].type = XR_TYPE_VIEW_CONFIGURATION_VIEW
+            views[i].next = nil
+            views[i].recommendedImageRectWidth = 1920 // TODO get from drawable
+            views[i].recommendedImageRectHeight = 1824
+            // TODO maxs
+            views[i].recommendedSwapchainSampleCount = 1
+        }
     }
     return XR_SUCCESS
 }
@@ -1266,35 +1388,28 @@ public func xrCreateSwapchain(_ session: XrSession,
     let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>.self)
     let sess = sess_ptr.pointee
     
-    // here we're just allocating some MTLTexture manually cause thats the correct type. if it was done this way, in endframe you would copy over the texture data into the final texture.
     
-    // I think the best way to support this is to get all the queryNextFrame()s, save their texture pointer so we can return an array of textures from enumerate, then release them all
-    // then in acquire we call it again and return the index that corresponds to the one we got. hoping that the texture we get from queryNextFrame is always at an address that we enumerated at the beginning
-    
-    // currently godot only requests one so this could be simpler
     let textureCount = Int(ci.arraySize > 0 ? ci.arraySize : 3)
     print("requested number of textures \(ci.arraySize)")
-    
-    // we're not doing anything with this texture yet, just returning what i think the correct type is
+
     let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: MTLPixelFormat(rawValue: UInt(ci.format))!,
                                                               width: Int(ci.width),
                                                               height: Int(ci.height),
                                                               mipmapped: false)
     descriptor.usage = [.renderTarget,
                         .shaderRead, // if we want this texture to get foveated rendering then the user has
-                        // to support not reading from the texture, so removing this should work
+                                     // to support not reading from the texture, so removing this would have to work
                         .pixelFormatView]
     descriptor.textureType = .type2DArray
+    descriptor.arrayLength = 2 // TODO based on textureCount
     
     
     var textures: [MTLTexture] = []
-    for _ in 0..<textureCount {
-        if let texture = sess.metalDevice.makeTexture(descriptor: descriptor) {
-            textures.append(texture)
-        }
+    if let texture = sess.metalDevice.makeTexture(descriptor: descriptor) {
+        textures.append(texture)
     }
     
-    let swapchain = Swapchain(textures: textures)
+    let swapchain = Swapchain(textures: textures, session: sess)
     sess_ptr.pointee.swapchain = swapchain
     swapchainOut.pointee = OpaquePointer(Unmanaged.passRetained(swapchain).toOpaque())
     return XR_SUCCESS
@@ -1367,7 +1482,20 @@ public func xrReleaseSwapchainImage(_ swapchain: XrSwapchain,
 public func xrWaitSwapchainImage(_ swapchain: XrSwapchain,
                                  _ waitInfo: UnsafePointer<XrSwapchainImageWaitInfo>?) -> XrResult {
     print("xrWaitSwapchainImage called")
-    // syncronisation for waiting until the user is allowed to render to the image
+    
+    let realitySwapchain = Unmanaged<Swapchain>.fromOpaque(UnsafeRawPointer(swapchain)).takeUnretainedValue()
+    
+    if let currentFrame = realitySwapchain.session.currentFrame {
+        let session_ptr = Unmanaged.passUnretained(realitySwapchain.session).toOpaque()
+        print("endupdate \(session_ptr)->\(currentFrame)")
+        currentFrame.endUpdate()
+        
+        // TODO wait
+        currentFrame.startSubmission()
+    } else {
+        print("null currentframe eh")
+    }
+    
     return XR_SUCCESS
 }
 
@@ -1420,22 +1548,5 @@ public func xrSuggestInteractionProfileBindings(_ instance: XrInstance,
 @_cdecl("xrSyncActions")
 public func xrSyncActions(_ session: XrSession, _ syncInfo: UnsafePointer<XrActionsSyncInfo>?) -> XrResult {
 //    print("xrSyncActions called")
-    return XR_SUCCESS
-}
-
-@_cdecl("xrWaitFrame")
-public func xrWaitFrame(_ session: XrSession,
-                        _ frameWaitInfo: UnsafePointer<XrFrameWaitInfo>?,
-                        _ frameState: UnsafeMutablePointer<XrFrameState>?) -> XrResult {
-    print("xrWaitFrame")
-    guard let frameState = frameState else {
-        return XR_ERROR_FUNCTION_UNSUPPORTED
-    }
-    frameState.pointee.type = XR_TYPE_FRAME_STATE
-    frameState.pointee.next = nil
-    
-    frameState.pointee.predictedDisplayTime = 0
-    frameState.pointee.predictedDisplayPeriod = Int64(1e9/90)
-    frameState.pointee.shouldRender = 1
     return XR_SUCCESS
 }
