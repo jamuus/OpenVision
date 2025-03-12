@@ -243,13 +243,13 @@ struct MetalLayerConfiguration: CompositorLayerConfiguration {
 
 public struct OpenXRScene: Scene {
     @State  var immersionStyle: (any ImmersionStyle) = FullImmersionStyle.full
-    let onLayerRendererReceived: ((LayerRenderer) -> Void)?
+    let onInit: (() -> Void)?
     let onAppear: (() -> Void)?
     @Binding var setImmersiveSpace: Bool
     @Binding var isLoading: Bool
     
-    public init(onLayerRendererReceived: ((LayerRenderer) -> Void)?, onAppear: (() -> Void)?, setImmersiveSpace: Binding<Bool>, isLoading: Binding<Bool>) {
-        self.onLayerRendererReceived = onLayerRendererReceived
+    public init(onInit: (() -> Void)?, onAppear: (() -> Void)?, setImmersiveSpace: Binding<Bool>, isLoading: Binding<Bool>) {
+        self.onInit = onInit
         self.onAppear = onAppear
         _setImmersiveSpace = setImmersiveSpace
         _isLoading = isLoading
@@ -266,7 +266,7 @@ public struct OpenXRScene: Scene {
         .windowResizability(.contentSize)
         ImmersiveSpace(id: "OpenXR") {
             CompositorLayer(configuration: MetalLayerConfiguration()) { layerRenderer in
-                onLayerRendererReceived?(layerRenderer)
+                onInit?()
                 globalLayerRenderer = layerRenderer
                 print("entered immersive space")
             }
