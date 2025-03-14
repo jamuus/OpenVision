@@ -325,31 +325,39 @@ struct ContentView: View {
 }
 
 nonisolated(unsafe) var globalLayerRenderer: LayerRenderer? = nil
-
+class EventQueue {
+    var queue: [Event] = []
+    
+    func newEvent(_ event: Event) {
+        // TODO locking?
+        queue.append(event)
+    }
+    
+    func getEvent() -> Event? {
+        if queue.isEmpty {
+            return nil
+        }
+        return queue.removeFirst()
+    }
+}
 // MARK: openxr impl
 class Instance {
-    var eventQueue: [Event] = []
+    var eventQueue: EventQueue
     var session: Session? // just one session for now
     let metalDevice: MTLDevice = MTLCreateSystemDefaultDevice()!
     
-    func enqueueEvent(_ event: Event) {
-        eventQueue.append(event)
-    }
-    
-    func dequeueEvent() -> Event? {
-        if eventQueue.isEmpty {
-            return nil
-        }
-        return eventQueue.removeFirst()
+    init() {
+        self.eventQueue = EventQueue()
     }
 }
 
 enum Event {
     case sessionStateChanged(state: XrSessionState)
     
-    func fillEventDataBuffer(_ oxrr: Instance,  _ buffer: inout XrEventDataBuffer) {
+    func fillEventDataBuffer(_ instance: Instance,  _ buffer: inout XrEventDataBuffer) {
         switch self {
         case .sessionStateChanged(let state):
+            // TODO this should get info from the event, not the instance
             buffer.type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED
             
             print("new state: \(state)")
@@ -357,7 +365,7 @@ enum Event {
                 let sessionStateChangedPtr = UnsafeMutableRawPointer(ptr)
                     .assumingMemoryBound(to: XrEventDataSessionStateChanged.self)
                 sessionStateChangedPtr.pointee.type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED
-                sessionStateChangedPtr.pointee.session = unsafeBitCast(oxrr.session, to: OpaquePointer.self)
+                sessionStateChangedPtr.pointee.session = unsafeBitCast(instance.session, to: OpaquePointer.self)
                 sessionStateChangedPtr.pointee.state = state
                 sessionStateChangedPtr.pointee.time = Int64(Date().timeIntervalSince1970)
             }
@@ -371,19 +379,22 @@ class Session {
     var worldTrackingProvider: WorldTrackingProvider
     var commandQueue : MTLCommandQueue
     var renderer: Renderer
+    var eventQueue: EventQueue
     
     init(
         metalDevice: MTLDevice,
         arSession: ARKitSession,
         worldTrackingProvider: WorldTrackingProvider,
         commandQueue: MTLCommandQueue,
-        renderer: Renderer) {
+        renderer: Renderer,
+        eventQueue: EventQueue) {
             self.metalDevice = metalDevice
             self.arSession = arSession
             self.worldTrackingProvider = worldTrackingProvider
             self.commandQueue = commandQueue
             self.swapchain = []
             self.renderer = renderer
+            self.eventQueue = eventQueue
         }
     
     var swapchain: [Swapchain]
@@ -421,6 +432,55 @@ public func xrCreateInstance(_ createInfo: UnsafePointer<XrInstanceCreateInfo>?,
     instanceOut.pointee = OpaquePointer(Unmanaged.passRetained(instance).toOpaque())
     return XR_SUCCESS
 }
+extension Instance {
+    func createSession() -> Session? {
+        if self.session != nil { // only support one session at the moment
+            return nil
+        }
+        
+        let session = Session(
+            metalDevice: self.metalDevice,
+            arSession: ARKitSession(),
+            worldTrackingProvider: WorldTrackingProvider(),
+            commandQueue: self.metalDevice.makeCommandQueue()!,
+            renderer: setupRenderer(device: self.metalDevice),
+            eventQueue: self.eventQueue
+        )
+        session.commandQueue.label = "openxr command queue"
+        return session
+    }
+}
+extension Session {
+    func setupSession() {
+        Task {
+            do {
+                globalLayerRenderer!.waitUntilRunning()
+                
+                let dataProviders: [DataProvider] = [self.worldTrackingProvider]
+                try await self.arSession.run(dataProviders)
+                while (true) {
+                    guard self.worldTrackingProvider.state != .running else { break }
+                    try await Task.sleep(nanoseconds: 10_000_000)
+                }
+                
+                // querydeviceanchor doesn't seem to return a result for a little while, lets not tell
+                // openxr we're ready until we start getting headset locations
+                while(true) {
+                    let timestamp = CACurrentMediaTime()
+                    guard self.worldTrackingProvider.queryDeviceAnchor(atTimestamp: timestamp) != nil else {
+                        try await Task.sleep(nanoseconds: 10_000_000)
+                        continue
+                    }
+                    break
+                }
+                
+                self.eventQueue.newEvent(Event.sessionStateChanged(state:XR_SESSION_STATE_READY))
+            } catch {
+                fatalError("Failed to init")
+            }
+        }
+    }
+}
 
 @_cdecl("xrCreateSession")
 public func xrCreateSession(_ instance: XrInstance,
@@ -430,57 +490,17 @@ public func xrCreateSession(_ instance: XrInstance,
     guard let sessionOut = session else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
-    guard WorldTrackingProvider.isSupported else {
-        print("World tracking no work")
-        return XR_ERROR_FUNCTION_UNSUPPORTED
-    }
     
     guard let inst = unsafeBitCast(instance, to: Instance?.self) else {
         return XR_ERROR_RUNTIME_FAILURE
     }
     
-    if inst.session != nil { // only support one session at the moment
+    let session = inst.createSession()
+    guard let session = session else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     
-    let session = Session(
-        metalDevice: inst.metalDevice,
-        arSession: ARKitSession(),
-        worldTrackingProvider: WorldTrackingProvider(),
-        commandQueue: inst.metalDevice.makeCommandQueue()!,
-        renderer: setupRenderer(device: inst.metalDevice)
-    )
-    session.commandQueue.label = "openxr command queue"
-    
-    inst.session = session
-    
-    Task {
-        do {
-            globalLayerRenderer!.waitUntilRunning()
-            
-            let dataProviders: [DataProvider] = [session.worldTrackingProvider]
-            try await session.arSession.run(dataProviders)
-            while (true) {
-                guard session.worldTrackingProvider.state != .running else { break }
-                try await Task.sleep(nanoseconds: 10_000_000)
-            }
-            
-            // querydeviceanchor doesn't seem to return a result for a little while, lets not tell
-            // openxr we're ready until we start getting headset locations
-            while(true) {
-                let timestamp = CACurrentMediaTime()
-                guard session.worldTrackingProvider.queryDeviceAnchor(atTimestamp: timestamp) != nil else {
-                    try await Task.sleep(nanoseconds: 10_000_000)
-                    continue
-                }
-                break
-            }
-            
-            inst.enqueueEvent(Event.sessionStateChanged(state:XR_SESSION_STATE_READY))
-        } catch {
-            fatalError("Failed to init")
-        }
-    }
+    session.setupSession()
     
     sessionOut.pointee = OpaquePointer(Unmanaged.passRetained(session).toOpaque())
     return XR_SUCCESS
@@ -662,7 +682,6 @@ public func xrBeginFrame(_ session: XrSession,
         currentFrame.endUpdate()
         
         // TODO should wait as per apple docs, but shouldn't wait as per openxr, maybe there's another api we should wait in?
-        // currentFrame.predictTiming()?.optimalInputTime
         LayerRenderer.Clock().wait(until:sess.timing!.optimalInputTime)
         
         currentFrame.startSubmission()
@@ -867,9 +886,6 @@ public func xrEndFrame(_ session: XrSession,
         print("No frame end info provided")
         return XR_ERROR_RUNTIME_FAILURE
     }
-    guard let drawable = sess.currentFrame?.queryDrawable() else {
-        fatalError("Drawable not available")
-    }
     
     //    print("Frame display time: \(info.displayTime)")
     //    print("Environment blend mode: \(info.environmentBlendMode)")
@@ -885,30 +901,30 @@ public func xrEndFrame(_ session: XrSession,
         for (i, layerHeaderOpt) in layersBuffer.enumerated() {
             if let layerHeaderPtr = layerHeaderOpt {
                 let layerHeader = layerHeaderPtr.pointee
-                //                print("Layer \(i):")
-                //                print("  Type: \(layerHeader.type)")
-                //                print("  Next: \(String(describing: layerHeader.next))")
-                //                print("  Layer flags: \(layerHeader.layerFlags)")
-                //                print("  Space: \(layerHeader.space)")
+//                print("Layer \(i):")
+//                print("  Type: \(layerHeader.type)")
+//                print("  Next: \(String(describing: layerHeader.next))")
+//                print("  Layer flags: \(layerHeader.layerFlags)")
+//                print("  Space: \(layerHeader.space)")
                 
                 switch layerHeader.type {
                 case XR_TYPE_COMPOSITION_LAYER_PROJECTION:
                     let projectionLayer = layerHeaderPtr.withMemoryRebound(to: XrCompositionLayerProjection.self, capacity: 1) { $0.pointee }
-                    //                     print("  Projection layer info:")
-                    //                     print("    Space: \(projectionLayer.space)")
-                    //                     print("    View count: \(projectionLayer.viewCount)")
+//                         print("  Projection layer info:")
+//                         print("    Space: \(projectionLayer.space)")
+//                         print("    View count: \(projectionLayer.viewCount)")
                     
                     if projectionLayer.viewCount > 0, let viewsPtr = projectionLayer.views {
                         let viewsBuffer = UnsafeBufferPointer(start: viewsPtr, count: Int(projectionLayer.viewCount))
                         for (viewIndex, view) in viewsBuffer.enumerated() {
-                            //                             print("      View \(viewIndex):")
-                            //                             print("        Pose: \(view.pose)")
-                            //                             print("        Field of View: left: \(degrees(view.fov.angleLeft)), right: \(degrees(view.fov.angleRight)), up: \(degrees(view.fov.angleUp)), down: \(degrees(view.fov.angleDown))")
-                            //                             print("        Swapchain SubImage:")
-                            //                             print("          Swapchain: \(view.subImage.swapchain)")
-                            //                             print("          ImageRect offset: \(view.subImage.imageRect.offset)")
-                            //                             print("          ImageRect extent: \(view.subImage.imageRect.extent)")
-                            //                             print("          Image array index: \(view.subImage.imageArrayIndex)")
+//                             print("      View \(viewIndex):")
+//                             print("        Pose: \(view.pose)")
+//                             print("        Field of View: left: \(degrees(view.fov.angleLeft)), right: \(degrees(view.fov.angleRight)), up: \(degrees(view.fov.angleUp)), down: \(degrees(view.fov.angleDown))")
+//                             print("        Swapchain SubImage:")
+//                             print("          Swapchain: \(view.subImage.swapchain)")
+//                             print("          ImageRect offset: \(view.subImage.imageRect.offset)")
+//                             print("          ImageRect extent: \(view.subImage.imageRect.extent)")
+//                             print("          Image array index: \(view.subImage.imageArrayIndex)")
                             colourSwapchain = Unmanaged<Swapchain>.fromOpaque(UnsafeRawPointer(view.subImage.swapchain)).takeUnretainedValue()
                             colourSwapchainIndex = Int(view.subImage.imageArrayIndex)
                         }
@@ -918,17 +934,17 @@ public func xrEndFrame(_ session: XrSession,
                             let base = next.assumingMemoryBound(to: XrBaseInStructure.self).pointee
                             if base.type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR {
                                 let depthInfo = next.assumingMemoryBound(to: XrCompositionLayerDepthInfoKHR.self).pointee
-                                //                                 print("        Depth Info:")
-                                //                                 print("          Min Depth: \(depthInfo.minDepth)")
-                                //                                 print("          Max Depth: \(depthInfo.maxDepth)")
-                                //                                 print("          Near Z: \(depthInfo.nearZ)")
-                                //                                 print("          Far Z: \(depthInfo.farZ)")
-                                //                                 print("          Depth Swapchain SubImage:")
-                                //                                 print("              Swapchain: \(depthInfo.subImage.swapchain)")
-                                //                                 print("              ImageRect:")
-                                //                                 print("                Offset - x: \(depthInfo.subImage.imageRect.offset.x), y: \(depthInfo.subImage.imageRect.offset.y)")
-                                //                                 print("                Extent - width: \(depthInfo.subImage.imageRect.extent.width), height: \(depthInfo.subImage.imageRect.extent.height)")
-                                //                                 print("              Image Array Index: \(depthInfo.subImage.imageArrayIndex)")
+//                                     print("        Depth Info:")
+//                                     print("          Min Depth: \(depthInfo.minDepth)")
+//                                     print("          Max Depth: \(depthInfo.maxDepth)")
+//                                     print("          Near Z: \(depthInfo.nearZ)")
+//                                     print("          Far Z: \(depthInfo.farZ)")
+//                                     print("          Depth Swapchain SubImage:")
+//                                     print("              Swapchain: \(depthInfo.subImage.swapchain)")
+//                                     print("              ImageRect:")
+//                                     print("                Offset - x: \(depthInfo.subImage.imageRect.offset.x), y: \(depthInfo.subImage.imageRect.offset.y)")
+//                                     print("                Extent - width: \(depthInfo.subImage.imageRect.extent.width), height: \(depthInfo.subImage.imageRect.extent.height)")
+//                                     print("              Image Array Index: \(depthInfo.subImage.imageArrayIndex)")
                                 depthSwapchain = Unmanaged<Swapchain>.fromOpaque(UnsafeRawPointer(depthInfo.subImage.swapchain)).takeUnretainedValue()
                                 depthSwapchainIndex = Int(depthInfo.subImage.imageArrayIndex)
                             } else {
@@ -955,18 +971,29 @@ public func xrEndFrame(_ session: XrSession,
         print("couldn't find swapchains")
         return XR_ERROR_RUNTIME_FAILURE
     } else {
-        drawSwapchainTextureToDrawable(
-            renderer: sess.renderer,
-            inputColour: colourSwapchain!.textures[0],
-            inputDepth: depthSwapchain!.textures[0],
-            output: drawable)
-        
-        sess.currentFrame!.endSubmission()
-        sess.currentFrame = nil
+        // TODO indexes of swapchain image
+        sess.Draw(colourSwapchain: colourSwapchain!, depthSwapchain: depthSwapchain!)
     }
     
     return XR_SUCCESS
 }
+
+extension Session {
+    func Draw(colourSwapchain : Swapchain, depthSwapchain : Swapchain) {
+        guard let drawable = self.currentFrame?.queryDrawable() else {
+            fatalError("Drawable not available")
+        }
+        drawSwapchainTextureToDrawable(
+            renderer: self.renderer,
+            inputColour: colourSwapchain.textures[0],
+            inputDepth: depthSwapchain.textures[0],
+            output: drawable)
+        
+        self.currentFrame!.endSubmission()
+        self.currentFrame = nil
+    }
+}
+
 @_cdecl("xrEnumerateApiLayerProperties")
 public func xrEnumerateApiLayerProperties(_ propertyCapacityInput: UInt32,
                                           _ propertyCountOutput: UnsafeMutablePointer<UInt32>?,
@@ -1058,10 +1085,13 @@ public func xrAttachSessionActionSets(_ session: XrSession,
 }
 
 @_cdecl("xrBeginSession")
-public func xrBeginSession(_ session: XrSession,
+public func xrBeginSession(_ xrsession: XrSession,
                            _ beginInfo: UnsafePointer<XrSessionBeginInfo>?) -> XrResult {
-    
     print("xrBeginSession")
+    
+//    guard let session = unsafeBitCast(xrsession, to: Session?.self) else {
+//        return XR_ERROR_RUNTIME_FAILURE
+//    }
     return XR_SUCCESS
 }
 
@@ -1420,11 +1450,13 @@ public func xrPathToString(_ instance: XrInstance,
 @_cdecl("xrPollEvent")
 public func xrPollEvent(_ instance: XrInstance,
                         _ eventDataBuffer: UnsafeMutablePointer<XrEventDataBuffer>?) -> XrResult {
+    
+    print("xrPollEvent")
     guard let inst = unsafeBitCast(instance, to: Instance?.self) else {
         return XR_ERROR_RUNTIME_FAILURE
     }
     
-    if let event = inst.dequeueEvent() {
+    if let event = inst.eventQueue.getEvent() {
         print("xrPollEvent returning event")
         if var buffer = eventDataBuffer?.pointee {
             event.fillEventDataBuffer(inst, &buffer)
