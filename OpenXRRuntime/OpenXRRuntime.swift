@@ -4,6 +4,7 @@ import OpenXRRuntime.OpenXR
 import Darwin
 import SwiftUI
 import CompositorServices
+import OpenXRRuntime.runtime
 
 // MARK: - OpenXR Function Pointer Type Aliases
 
@@ -243,12 +244,12 @@ struct MetalLayerConfiguration: CompositorLayerConfiguration {
 
 public struct OpenXRScene: Scene {
     @State  var immersionStyle: (any ImmersionStyle) = FullImmersionStyle.full
-    let onInit: (() -> Void)?
+    let onInit: ((LayerRenderer) -> Void)?
     let onAppear: (() -> Void)?
     @Binding var setImmersiveSpace: Bool
     @Binding var isLoading: Bool
     
-    public init(onInit: (() -> Void)?, onAppear: (() -> Void)?, setImmersiveSpace: Binding<Bool>, isLoading: Binding<Bool>) {
+    public init(onInit: ((LayerRenderer) -> Void)?, onAppear: (() -> Void)?, setImmersiveSpace: Binding<Bool>, isLoading: Binding<Bool>) {
         self.onInit = onInit
         self.onAppear = onAppear
         _setImmersiveSpace = setImmersiveSpace
@@ -266,7 +267,7 @@ public struct OpenXRScene: Scene {
         .windowResizability(.contentSize)
         ImmersiveSpace(id: "OpenXR") {
             CompositorLayer(configuration: MetalLayerConfiguration()) { layerRenderer in
-                onInit?()
+                onInit?(layerRenderer)
                 globalLayerRenderer = layerRenderer
                 print("entered immersive space")
             }
@@ -328,7 +329,7 @@ nonisolated(unsafe) var globalLayerRenderer: LayerRenderer? = nil
 // MARK: openxr impl
 class Instance {
     var eventQueue: [Event] = []
-    var session: UnsafeMutablePointer<Session>? // just one session for now
+    var session: Session? // just one session for now
     let metalDevice: MTLDevice = MTLCreateSystemDefaultDevice()!
     
     func enqueueEvent(_ event: Event) {
@@ -356,7 +357,7 @@ enum Event {
                 let sessionStateChangedPtr = UnsafeMutableRawPointer(ptr)
                     .assumingMemoryBound(to: XrEventDataSessionStateChanged.self)
                 sessionStateChangedPtr.pointee.type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED
-                sessionStateChangedPtr.pointee.session = OpaquePointer(oxrr.session)
+                sessionStateChangedPtr.pointee.session = unsafeBitCast(oxrr.session, to: OpaquePointer.self)
                 sessionStateChangedPtr.pointee.state = state
                 sessionStateChangedPtr.pointee.time = Int64(Date().timeIntervalSince1970)
             }
@@ -416,9 +417,8 @@ public func xrCreateInstance(_ createInfo: UnsafePointer<XrInstanceCreateInfo>?,
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     
-    let myInstancePtr = UnsafeMutablePointer<Instance>.allocate(capacity: 1)
-    myInstancePtr.initialize(to: Instance())
-    instanceOut.pointee = OpaquePointer(myInstancePtr)
+    let instance = Instance()
+    instanceOut.pointee = OpaquePointer(Unmanaged.passRetained(instance).toOpaque())
     return XR_SUCCESS
 }
 
@@ -435,33 +435,33 @@ public func xrCreateSession(_ instance: XrInstance,
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     
-    let inst_ptr = unsafeBitCast(instance, to: UnsafeMutablePointer<Instance>.self)
-    let inst = inst_ptr.pointee
+    guard let inst = unsafeBitCast(instance, to: Instance?.self) else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
     
     if inst.session != nil { // only support one session at the moment
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     
-    inst.session = UnsafeMutablePointer<Session>.allocate(capacity: 1)
-    inst.session!.initialize(to: Session(
+    let session = Session(
         metalDevice: inst.metalDevice,
         arSession: ARKitSession(),
         worldTrackingProvider: WorldTrackingProvider(),
         commandQueue: inst.metalDevice.makeCommandQueue()!,
         renderer: setupRenderer(device: inst.metalDevice)
-    ))
+    )
+    session.commandQueue.label = "openxr command queue"
     
-    let session = inst.session?.pointee
-    session?.commandQueue.label = "openxr command queue"
+    inst.session = session
     
     Task {
         do {
             globalLayerRenderer!.waitUntilRunning()
             
-            let dataProviders: [DataProvider] = [session!.worldTrackingProvider]
-            try await session!.arSession.run(dataProviders)
+            let dataProviders: [DataProvider] = [session.worldTrackingProvider]
+            try await session.arSession.run(dataProviders)
             while (true) {
-                guard session!.worldTrackingProvider.state != .running else { break }
+                guard session.worldTrackingProvider.state != .running else { break }
                 try await Task.sleep(nanoseconds: 10_000_000)
             }
             
@@ -469,7 +469,7 @@ public func xrCreateSession(_ instance: XrInstance,
             // openxr we're ready until we start getting headset locations
             while(true) {
                 let timestamp = CACurrentMediaTime()
-                guard session!.worldTrackingProvider.queryDeviceAnchor(atTimestamp: timestamp) != nil else {
+                guard session.worldTrackingProvider.queryDeviceAnchor(atTimestamp: timestamp) != nil else {
                     try await Task.sleep(nanoseconds: 10_000_000)
                     continue
                 }
@@ -482,8 +482,7 @@ public func xrCreateSession(_ instance: XrInstance,
         }
     }
     
-    inst.session?.pointee = session!
-    sessionOut.pointee = OpaquePointer(inst.session!)
+    sessionOut.pointee = OpaquePointer(Unmanaged.passRetained(session).toOpaque())
     return XR_SUCCESS
 }
 
@@ -513,24 +512,23 @@ public func xrWaitFrame(_ session: XrSession,
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     print("xrWaitFrame")
-    let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>?.self)
-    let sess = sess_ptr?.pointee
-    
+    guard let sess = unsafeBitCast(session, to: Session?.self) else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
     print("\tpaused: \(globalLayerRenderer!.state == .paused), running: \(globalLayerRenderer!.state == .running), invalidated: \(globalLayerRenderer!.state == .invalidated)")
     
     var frame : LayerRenderer.Frame?
-    if sess!.currentFrame != nil {
+    if sess.currentFrame != nil {
         print("currentframe shouldn't be non nil")
-        frame = sess!.currentFrame
+        frame = sess.currentFrame
         return XR_ERROR_RUNTIME_FAILURE
     } else {
         frame = globalLayerRenderer!.queryNextFrame()
-        sess!.currentFrame = frame
+        sess.currentFrame = frame
     }
-    sess_ptr!.pointee = sess!
     
-    sess_ptr!.pointee.timing = frame!.predictTiming()!
-    let deadline = sess_ptr!.pointee.timing!.presentationTime
+    sess.timing = frame!.predictTiming()!
+    let deadline = sess.timing!.presentationTime
     
     let (seconds, attoseconds) = LayerRenderer.Clock.Instant.epoch.duration(to: deadline).components
     let deadlineNanos: Int64 = Int64(seconds) * 1_000_000_000 + Int64(attoseconds / 1_000_000_000)
@@ -542,8 +540,7 @@ public func xrWaitFrame(_ session: XrSession,
     frameState.pointee.predictedDisplayPeriod = Int64(1e9/90) // TODO get from somewhere?
     frameState.pointee.shouldRender = 1 // TODO would be set to 0 if window is minimised or something
     
-    
-    sess!.currentFrame!.startUpdate()
+    sess.currentFrame!.startUpdate()
     return XR_SUCCESS
 }
 
@@ -592,9 +589,9 @@ public func xrLocateViews(_ session: XrSession,
                           _ viewCountOutput: UnsafeMutablePointer<UInt32>?,
                           _ views: UnsafeMutablePointer<XrView>?) -> XrResult {
     print("xrLocateViews called")
-    
-    let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>.self)
-    let sess = sess_ptr.pointee
+    guard let sess = unsafeBitCast(session, to: Session?.self) else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
     
     let timestamp = CACurrentMediaTime()
     guard let deviceAnchor = sess.worldTrackingProvider.queryDeviceAnchor(atTimestamp: timestamp) else {
@@ -648,7 +645,7 @@ public func xrLocateViews(_ session: XrSession,
             views[i].fov.angleDown  = Float(-angles.angleDown)
         }
     }
-    sess_ptr.pointee = sess
+//    sess_ptr.pointee = sess
     return XR_SUCCESS
 }
 
@@ -657,15 +654,17 @@ public func xrLocateViews(_ session: XrSession,
 public func xrBeginFrame(_ session: XrSession,
                          _ frameBeginInfo: UnsafePointer<XrFrameBeginInfo>?) -> XrResult {
     print("xrBeginFrame called")
-    
-    let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>.self)
-    let sess = sess_ptr.pointee
+    guard let sess = unsafeBitCast(session, to: Session?.self) else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
     
     if let currentFrame = sess.currentFrame {
         currentFrame.endUpdate()
         
         // TODO should wait as per apple docs, but shouldn't wait as per openxr, maybe there's another api we should wait in?
         // currentFrame.predictTiming()?.optimalInputTime
+        LayerRenderer.Clock().wait(until:sess.timing!.optimalInputTime)
+        
         currentFrame.startSubmission()
     } else {
         print("null currentframe eh")
@@ -860,9 +859,9 @@ func rads(_ degrees: Float) -> Float {
 public func xrEndFrame(_ session: XrSession,
                        _ frameEndInfo: UnsafePointer<XrFrameEndInfo>?) -> XrResult {
     print("xrEndFrame called")
-    
-    let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>.self)
-    let sess = sess_ptr.pointee
+    guard let sess = unsafeBitCast(session, to: Session?.self) else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
     
     guard let info = frameEndInfo?.pointee else {
         print("No frame end info provided")
@@ -1030,8 +1029,11 @@ public func xrGetMetalGraphicsRequirementsKHR(_ instance: XrInstance,
     guard let metalRequirements = metalRequirements else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
-    let inst_ptr = unsafeBitCast(instance, to: UnsafeMutablePointer<Instance>.self)
-    let inst = inst_ptr.pointee
+    
+    guard let inst = unsafeBitCast(instance, to: Instance?.self) else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
+    
     
     metalRequirements.pointee.type = XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR
     metalRequirements.pointee.next = nil
@@ -1058,6 +1060,7 @@ public func xrAttachSessionActionSets(_ session: XrSession,
 @_cdecl("xrBeginSession")
 public func xrBeginSession(_ session: XrSession,
                            _ beginInfo: UnsafePointer<XrSessionBeginInfo>?) -> XrResult {
+    
     print("xrBeginSession")
     return XR_SUCCESS
 }
@@ -1417,8 +1420,9 @@ public func xrPathToString(_ instance: XrInstance,
 @_cdecl("xrPollEvent")
 public func xrPollEvent(_ instance: XrInstance,
                         _ eventDataBuffer: UnsafeMutablePointer<XrEventDataBuffer>?) -> XrResult {
-    let inst_ptr = unsafeBitCast(instance, to: UnsafeMutablePointer<Instance>.self)
-    let inst = inst_ptr.pointee
+    guard let inst = unsafeBitCast(instance, to: Instance?.self) else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
     
     if let event = inst.dequeueEvent() {
         print("xrPollEvent returning event")
@@ -1426,14 +1430,12 @@ public func xrPollEvent(_ instance: XrInstance,
             event.fillEventDataBuffer(inst, &buffer)
             eventDataBuffer?.pointee = buffer
         }
-        inst_ptr.pointee = inst
         return XR_SUCCESS
     }
     
     eventDataBuffer?.pointee.type = XrStructureType(0)
     return XR_EVENT_UNAVAILABLE
 }
-
 
 // MARK: swapchains
 
@@ -1466,8 +1468,9 @@ public func xrCreateSwapchain(_ session: XrSession,
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     
-    let sess_ptr = unsafeBitCast(session, to: UnsafeMutablePointer<Session>.self)
-    let sess = sess_ptr.pointee
+    guard let sess = unsafeBitCast(session, to: Session?.self) else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
     
     let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: MTLPixelFormat(rawValue: UInt(ci.format))!,
                                                               width: Int(ci.width),
