@@ -287,6 +287,7 @@ public struct OpenXRScene: Scene {
             }
         }
         .immersionStyle(selection: $immersionStyle, in: .mixed, .full)
+        .upperLimbVisibility(.hidden)
     }
 }
 
@@ -427,15 +428,6 @@ class Swapchain {
     }
 }
 
-extension simd_float4x4 {
-    var translation: simd_float3 {
-        return simd_float3(columns.3.x, columns.3.y, columns.3.z)
-    }
-    
-    var orientation: simd_quatf {
-        return simd_quaternion(self)
-    }
-}
 
 @_cdecl("xrCreateInstance")
 public func xrCreateInstance(_ createInfo: UnsafePointer<XrInstanceCreateInfo>?,
@@ -1030,18 +1022,13 @@ extension Session {
 class HandTracker {
     var chirality : XrHandEXT
     var provider : HandTrackingProvider
-    var reference : WorldTrackingProvider
     
-    init(chirality: XrHandEXT, provider : HandTrackingProvider, reference : WorldTrackingProvider) {
+    init(chirality: XrHandEXT, provider : HandTrackingProvider) {
         self.chirality = chirality
         self.provider = provider
-        self.reference = reference
     }
 }
 
-extension Session {
-    
-}
 @_cdecl("xrCreateHandTrackerEXT")
 public func xrCreateHandTrackerEXT(_ session: XrSession,
                                      _ createInfo: UnsafePointer<XrHandTrackerCreateInfoEXT>?,
@@ -1050,23 +1037,32 @@ public func xrCreateHandTrackerEXT(_ session: XrSession,
     guard let session = unsafeBitCast(session, to: Session?.self) else {
         return XR_ERROR_RUNTIME_FAILURE
     }
-    print("XrHandTrackerCreateInfoEXT:")
-    print("  type: \(createInfo!.pointee.type)")
-    print("  next: \(String(describing: createInfo!.pointee.next))")
-    print("  hand: \(createInfo!.pointee.hand)")
+//    print("XrHandTrackerCreateInfoEXT:")
+//    print("  type: \(createInfo!.pointee.type)")
+//    print("  next: \(String(describing: createInfo!.pointee.next))")
+//    print("  hand: \(createInfo!.pointee.hand)")
     let ht = HandTracker(chirality: createInfo!.pointee.hand,
-                         provider: session.handTrackingProvider,
-                         reference: session.worldTrackingProvider)
+                         provider: session.handTrackingProvider)
     
     handTracker!.pointee = OpaquePointer(Unmanaged.passRetained(ht).toOpaque())
     return XR_SUCCESS
+}
+
+extension simd_float4x4 {
+    var translation: simd_float3 {
+        return simd_float3(columns.3.x, columns.3.y, columns.3.z)
+    }
+    
+    var orientation: simd_quatf {
+        return simd_quaternion(self)
+    }
 }
 
 @_cdecl("xrLocateHandJointsEXT")
 public func xrLocateHandJointsEXT(_ handTracker: XrHandTrackerEXT,
                                   _ locateInfo: UnsafePointer<XrHandJointsLocateInfoEXT>?,
                                   _ locations: UnsafeMutablePointer<XrHandJointLocationsEXT>?) -> XrResult {
-    print("xrLocateHandJointsEXT called")
+//    print("xrLocateHandJointsEXT called")
     
     guard let ht = unsafeBitCast(handTracker, to: HandTracker?.self) else {
         return XR_ERROR_RUNTIME_FAILURE
@@ -1077,71 +1073,85 @@ public func xrLocateHandJointsEXT(_ handTracker: XrHandTrackerEXT,
     }
     
     let info = locateInfo.pointee
-    print("XrHandJointsLocateInfoEXT:")
-    print("  type: \(info.type)")
-    print("  baseSpace: \(info.baseSpace)")
-    print("  time: \(info.time)")
+//    print("XrHandJointsLocateInfoEXT:")
+//    print("  type: \(info.type)")
+//    print("  baseSpace: \(info.baseSpace)")
+//    print("  time: \(info.time)")
     
     let deadlineSeconds: Double = Double(info.time) / 1_000_000_000.0
     
     let (leftAnchor, rightAnchor) = ht.provider.handAnchors(at: deadlineSeconds)
     var handAnchor: HandAnchor?
+    var jointRotationAdjustment : simd_quatf?
     if ht.chirality == XR_HAND_LEFT_EXT {
         handAnchor = leftAnchor
+        jointRotationAdjustment = simd_quatf(angle: .pi / 2, axis: simd_float3(0, -1, 0))
+        // i dunno how to get this right
+        jointRotationAdjustment =  jointRotationAdjustment! *
+            simd_quatf(angle: .pi / 2, axis: simd_float3(0, 0, -2))
+
     } else if ht.chirality == XR_HAND_RIGHT_EXT {
         handAnchor = rightAnchor
+        jointRotationAdjustment = simd_quatf(angle: .pi / 2, axis: simd_float3(0, 1, 0))
+
     } else {
         print("Unknown hand chirality")
+        return XR_ERROR_RUNTIME_FAILURE
     }
     
-    let openxrJointCount = 27
+    let openxrJointCount = locations.pointee.jointCount
     locations.pointee.isActive = XrBool32(handAnchor != nil ? XR_TRUE : XR_FALSE)
-    locations.pointee.jointCount = UInt32(openxrJointCount)
+//    print("joint count: \(openxrJointCount)")
     
     // Ensure the jointLocations pointer is valid.
     guard let jointLocationsPtr = locations.pointee.jointLocations else {
         print("jointLocations pointer is nil")
         return XR_ERROR_RUNTIME_FAILURE
     }
-    
-    // Mapping of the ARKit HandJoint enum in the order corresponding to OpenXR joint indexes.
     let jointMapping: [HandSkeleton.JointName] = [
-        .forearmArm,
-        .forearmWrist,
-        .wrist,
-        .thumbIntermediateBase,
-        .thumbIntermediateTip,
-        .thumbKnuckle,
-        .thumbTip,
-        .indexFingerIntermediateBase,
-        .indexFingerIntermediateTip,
-        .indexFingerKnuckle,
-        .indexFingerMetacarpal,
-        .indexFingerTip,
-        .middleFingerIntermediateBase,
-        .middleFingerIntermediateTip,
-        .middleFingerKnuckle,
-        .middleFingerMetacarpal,
-        .middleFingerTip,
-        .ringFingerIntermediateBase,
-        .ringFingerIntermediateTip,
-        .ringFingerKnuckle,
-        .ringFingerMetacarpal,
-        .ringFingerTip,
-        .littleFingerIntermediateBase,
-        .littleFingerIntermediateTip,
-        .littleFingerKnuckle,
-        .littleFingerMetacarpal,
-        .littleFingerTip
+        .wrist,                         // 0: XR_HAND_JOINT_PALM_EXT (use wrist as palm center)
+        .wrist,                         // 1: XR_HAND_JOINT_WRIST_EXT
+        
+        .thumbKnuckle,                  // 2: XR_HAND_JOINT_THUMB_METACARPAL_EXT
+        .thumbIntermediateBase,         // 3: XR_HAND_JOINT_THUMB_PROXIMAL_EXT
+        .thumbIntermediateTip,          // 4: XR_HAND_JOINT_THUMB_DISTAL_EXT
+        .thumbTip,                      // 5: XR_HAND_JOINT_THUMB_TIP_EXT
+        
+        .indexFingerMetacarpal,         // 6: XR_HAND_JOINT_INDEX_METACARPAL_EXT
+        .indexFingerKnuckle,            // 7: XR_HAND_JOINT_INDEX_PROXIMAL_EXT
+        .indexFingerIntermediateBase,   // 8: XR_HAND_JOINT_INDEX_INTERMEDIATE_EXT
+        .indexFingerIntermediateTip,    // 9: XR_HAND_JOINT_INDEX_DISTAL_EXT
+        .indexFingerTip,                // 10: XR_HAND_JOINT_INDEX_TIP_EXT
+        
+        .middleFingerMetacarpal,        // 11: XR_HAND_JOINT_MIDDLE_METACARPAL_EXT
+        .middleFingerKnuckle,           // 12: XR_HAND_JOINT_MIDDLE_PROXIMAL_EXT
+        .middleFingerIntermediateBase,  // 13: XR_HAND_JOINT_MIDDLE_INTERMEDIATE_EXT
+        .middleFingerIntermediateTip,   // 14: XR_HAND_JOINT_MIDDLE_DISTAL_EXT
+        .middleFingerTip,               // 15: XR_HAND_JOINT_MIDDLE_TIP_EXT
+        
+        .ringFingerMetacarpal,          // 16: XR_HAND_JOINT_RING_METACARPAL_EXT
+        .ringFingerKnuckle,             // 17: XR_HAND_JOINT_RING_PROXIMAL_EXT
+        .ringFingerIntermediateBase,    // 18: XR_HAND_JOINT_RING_INTERMEDIATE_EXT
+        .ringFingerIntermediateTip,     // 19: XR_HAND_JOINT_RING_DISTAL_EXT
+        .ringFingerTip,                 // 20: XR_HAND_JOINT_RING_TIP_EXT
+        
+        .littleFingerMetacarpal,        // 21: XR_HAND_JOINT_LITTLE_METACARPAL_EXT
+        .littleFingerKnuckle,           // 22: XR_HAND_JOINT_LITTLE_PROXIMAL_EXT
+        .littleFingerIntermediateBase,  // 23: XR_HAND_JOINT_LITTLE_INTERMEDIATE_EXT
+        .littleFingerIntermediateTip,   // 24: XR_HAND_JOINT_LITTLE_DISTAL_EXT
+        .littleFingerTip                // 25: XR_HAND_JOINT_LITTLE_TIP_EXT
     ]
-//    let reference = ht.reference.queryDeviceAnchor(atTimestamp: deadlineSeconds)
     
     if let handAnchor = handAnchor, let handSkeleton = handAnchor.handSkeleton {
         for (openxrIndex, joint) in jointMapping.enumerated() {
             var transform : simd_float4x4? = handSkeleton.joint(joint).anchorFromJointTransform
             if transform != nil {
+                // handAnchor.originFromAnchorTransform is base of the wrist
                 transform = handAnchor.originFromAnchorTransform * transform!
-                let orientation = transform!.orientation
+
+                var orientation = transform!.orientation
+                orientation = orientation * jointRotationAdjustment!
+                
                 jointLocationsPtr[openxrIndex].pose.orientation.x = orientation.vector.x
                 jointLocationsPtr[openxrIndex].pose.orientation.y = orientation.vector.y
                 jointLocationsPtr[openxrIndex].pose.orientation.z = orientation.vector.z
@@ -1152,7 +1162,7 @@ public func xrLocateHandJointsEXT(_ handTracker: XrHandTrackerEXT,
                 jointLocationsPtr[openxrIndex].pose.position.y = translation.y
                 jointLocationsPtr[openxrIndex].pose.position.z = translation.z
                 
-                jointLocationsPtr[openxrIndex].radius = 0.01
+                jointLocationsPtr[openxrIndex].radius = 0.05 // not sure what this does
                 
                 jointLocationsPtr[openxrIndex].locationFlags =
                     XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
@@ -1166,7 +1176,7 @@ public func xrLocateHandJointsEXT(_ handTracker: XrHandTrackerEXT,
     } else {
         // No valid hand data; mark all joints as inactive.
         for i in 0..<openxrJointCount {
-            jointLocationsPtr[i].locationFlags = 0
+            jointLocationsPtr[Int(i)].locationFlags = 0
         }
     }
     
