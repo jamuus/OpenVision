@@ -57,6 +57,12 @@ public typealias PFN_xrSyncActions = @convention(c) (XrSession, UnsafePointer<Xr
 public typealias PFN_xrWaitFrame = @convention(c) (XrSession, UnsafePointer<XrFrameWaitInfo>?, UnsafeMutablePointer<XrFrameState>?) -> XrResult
 public typealias PFN_xrWaitSwapchainImage = @convention(c) (XrSwapchain, UnsafePointer<XrSwapchainImageWaitInfo>?) -> XrResult
 
+public typealias PFN_xrCreateHandTrackerEXT = @convention(c) (XrSession, UnsafePointer<XrHandTrackerCreateInfoEXT>?, UnsafeMutablePointer<XrHandTrackerEXT>?) -> XrResult
+public typealias PFN_xrDestroyHandTrackerEXT = @convention(c) (XrHandTrackerEXT) -> XrResult
+public typealias PFN_xrLocateHandJointsEXT = @convention(c) (XrHandTrackerEXT,
+                                                               UnsafePointer<XrHandJointsLocateInfoEXT>?,
+                                                               UnsafeMutablePointer<XrHandJointLocationsEXT>?) -> XrResult
+
 // MARK: - OpenXR API Entry Points
 
 /// xrGetInstanceProcAddr is the main entry point that the OpenXR loader uses to query function pointers.
@@ -214,6 +220,15 @@ public func xrGetInstanceProcAddr(_ instance: XrInstance,
     case "xrWaitSwapchainImage":
         function?.pointee = unsafeBitCast(xrWaitSwapchainImage as PFN_xrWaitSwapchainImage,
                                           to: UnsafeMutableRawPointer.self)
+    case "xrCreateHandTrackerEXT":
+        function?.pointee = unsafeBitCast(xrCreateHandTrackerEXT as PFN_xrCreateHandTrackerEXT,
+                                          to: UnsafeMutableRawPointer.self)
+    case "xrDestroyHandTrackerEXT":
+        function?.pointee = unsafeBitCast(xrDestroyHandTrackerEXT as PFN_xrDestroyHandTrackerEXT,
+                                          to: UnsafeMutableRawPointer.self)
+    case "xrLocateHandJointsEXT":
+        function?.pointee = unsafeBitCast(xrLocateHandJointsEXT as PFN_xrLocateHandJointsEXT,
+                                          to: UnsafeMutableRawPointer.self)
     default:
         print("asked for \(funcName) but unsupported")
         function?.pointee = nil
@@ -229,12 +244,11 @@ struct MetalLayerConfiguration: CompositorLayerConfiguration {
         let supportsFoveation = capabilities.supportsFoveation
         let supportedLayouts = capabilities.supportedLayouts(options: supportsFoveation ? [.foveationEnabled] : [])
         
-        // The device supports the `dedicated` and `layered` layouts, and optionally `shared` when foveation is disabled
-        // The simulator supports the `dedicated` and `shared` layouts.
-        // However, since we use vertex amplification to implement shared rendering, it won't work on the simulator in this project.
         configuration.layout = supportedLayouts.contains(.layered) ? .layered : .dedicated
         print("layout: \(configuration.layout)")
         
+        // although we copy the user texture to the final texture, there is still benefit for foveation
+        // when the user texture is bigger than the layer renderer one
         configuration.isFoveationEnabled = supportsFoveation
         
         print("supportsFoveation: \(supportsFoveation)")
@@ -255,7 +269,7 @@ public struct OpenXRScene: Scene {
         _setImmersiveSpace = setImmersiveSpace
         _isLoading = isLoading
     }
-    
+
     public var body: some SwiftUI.Scene {
         WindowGroup {
             ContentView($immersionStyle, $setImmersiveSpace, $isLoading)
@@ -377,6 +391,7 @@ class Session {
     let metalDevice: MTLDevice
     let arSession: ARKitSession
     var worldTrackingProvider: WorldTrackingProvider
+    var handTrackingProvider: HandTrackingProvider
     var commandQueue : MTLCommandQueue
     var renderer: Renderer
     var eventQueue: EventQueue
@@ -387,7 +402,8 @@ class Session {
         worldTrackingProvider: WorldTrackingProvider,
         commandQueue: MTLCommandQueue,
         renderer: Renderer,
-        eventQueue: EventQueue) {
+        eventQueue: EventQueue,
+        handtrackingProvider: HandTrackingProvider ) {
             self.metalDevice = metalDevice
             self.arSession = arSession
             self.worldTrackingProvider = worldTrackingProvider
@@ -395,6 +411,7 @@ class Session {
             self.swapchain = []
             self.renderer = renderer
             self.eventQueue = eventQueue
+            self.handTrackingProvider = handtrackingProvider
         }
     
     var swapchain: [Swapchain]
@@ -444,7 +461,8 @@ extension Instance {
             worldTrackingProvider: WorldTrackingProvider(),
             commandQueue: self.metalDevice.makeCommandQueue()!,
             renderer: setupRenderer(device: self.metalDevice),
-            eventQueue: self.eventQueue
+            eventQueue: self.eventQueue,
+            handtrackingProvider: HandTrackingProvider()
         )
         session.commandQueue.label = "openxr command queue"
         return session
@@ -456,7 +474,7 @@ extension Session {
             do {
                 globalLayerRenderer!.waitUntilRunning()
                 
-                let dataProviders: [DataProvider] = [self.worldTrackingProvider]
+                let dataProviders: [DataProvider] = [self.worldTrackingProvider, self.handTrackingProvider]
                 try await self.arSession.run(dataProviders)
                 while (true) {
                     guard self.worldTrackingProvider.state != .running else { break }
@@ -531,11 +549,11 @@ public func xrWaitFrame(_ session: XrSession,
     guard let frameState = frameState else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
-    print("xrWaitFrame")
+//    print("xrWaitFrame")
     guard let sess = unsafeBitCast(session, to: Session?.self) else {
         return XR_ERROR_RUNTIME_FAILURE
     }
-    print("\tpaused: \(globalLayerRenderer!.state == .paused), running: \(globalLayerRenderer!.state == .running), invalidated: \(globalLayerRenderer!.state == .invalidated)")
+//    print("\tpaused: \(globalLayerRenderer!.state == .paused), running: \(globalLayerRenderer!.state == .running), invalidated: \(globalLayerRenderer!.state == .invalidated)")
     
     var frame : LayerRenderer.Frame?
     if sess.currentFrame != nil {
@@ -549,18 +567,19 @@ public func xrWaitFrame(_ session: XrSession,
     
     sess.timing = frame!.predictTiming()!
     let deadline = sess.timing!.presentationTime
-    
+
     let (seconds, attoseconds) = LayerRenderer.Clock.Instant.epoch.duration(to: deadline).components
     let deadlineNanos: Int64 = Int64(seconds) * 1_000_000_000 + Int64(attoseconds / 1_000_000_000)
-    
+
     frameState.pointee.type = XR_TYPE_FRAME_STATE
     frameState.pointee.next = nil
-    
+
     frameState.pointee.predictedDisplayTime = deadlineNanos
     frameState.pointee.predictedDisplayPeriod = Int64(1e9/90) // TODO get from somewhere?
     frameState.pointee.shouldRender = 1 // TODO would be set to 0 if window is minimised or something
-    
-    sess.currentFrame!.startUpdate()
+
+    // although godot seems to call xrwaitframe before doing update(), i don't think its supposed to
+    // sess.currentFrame!.startUpdate()
     return XR_SUCCESS
 }
 
@@ -608,13 +627,19 @@ public func xrLocateViews(_ session: XrSession,
                           _ viewCapacityInput: UInt32,
                           _ viewCountOutput: UnsafeMutablePointer<UInt32>?,
                           _ views: UnsafeMutablePointer<XrView>?) -> XrResult {
-    print("xrLocateViews called")
+//    print("xrLocateViews")
     guard let sess = unsafeBitCast(session, to: Session?.self) else {
         return XR_ERROR_RUNTIME_FAILURE
     }
     
-    let timestamp = CACurrentMediaTime()
-    guard let deviceAnchor = sess.worldTrackingProvider.queryDeviceAnchor(atTimestamp: timestamp) else {
+    
+    let drawable = sess.currentFrame!.queryDrawable()!
+//    print("drawable size: (\(drawable.colorTextures[0].width),\(drawable.colorTextures[0].height))")
+    
+//    let timestamp = CACurrentMediaTime()
+    let (seconds, attoseconds) = LayerRenderer.Clock.Instant.epoch.duration(to: drawable.frameTiming.presentationTime).components
+    let presentationTime: Double = Double(seconds) + Double(attoseconds) * 1e-18
+    guard let deviceAnchor = sess.worldTrackingProvider.queryDeviceAnchor(atTimestamp: presentationTime) else {
         print("No device anchor available")
         return XR_ERROR_RUNTIME_FAILURE
     }
@@ -623,12 +648,11 @@ public func xrLocateViews(_ session: XrSession,
         return XR_ERROR_RUNTIME_FAILURE
     }
     
-    let drawable = sess.currentFrame!.queryDrawable()!
     drawable.deviceAnchor = deviceAnchor
     
     let viewCount = drawable.views.count
     viewCountOutput?.pointee = UInt32(viewCount)
-    
+
     if let viewState = viewState {
         viewState.pointee.type = XR_TYPE_VIEW_STATE
         viewState.pointee.next = nil
@@ -665,7 +689,6 @@ public func xrLocateViews(_ session: XrSession,
             views[i].fov.angleDown  = Float(-angles.angleDown)
         }
     }
-//    sess_ptr.pointee = sess
     return XR_SUCCESS
 }
 
@@ -673,13 +696,13 @@ public func xrLocateViews(_ session: XrSession,
 @_cdecl("xrBeginFrame")
 public func xrBeginFrame(_ session: XrSession,
                          _ frameBeginInfo: UnsafePointer<XrFrameBeginInfo>?) -> XrResult {
-    print("xrBeginFrame called")
+//    print("xrBeginFrame")
     guard let sess = unsafeBitCast(session, to: Session?.self) else {
         return XR_ERROR_RUNTIME_FAILURE
     }
     
     if let currentFrame = sess.currentFrame {
-        currentFrame.endUpdate()
+        // currentFrame.endUpdate()
         
         // TODO should wait as per apple docs, but shouldn't wait as per openxr, maybe there's another api we should wait in?
         LayerRenderer.Clock().wait(until:sess.timing!.optimalInputTime)
@@ -827,6 +850,14 @@ func drawSwapchainTextureToDrawable(renderer: Renderer,
     renderPassDescriptor.depthAttachment.clearDepth = 1.0
     
     renderPassDescriptor.rasterizationRateMap = output.rasterizationRateMaps.first
+    /*
+     By default, a render pass doesn’t have a rasterization rate map, and the viewport coordinate system maps exactly to physical pixels in the targeted textures. If you apply a rasterization rate map to a render pass, the viewport coordinate system becomes a logical coordinate system, and the rate map describes how to map logical coordinates to physical pixels in the render pass’s targets. You can specify different rasterization rates in different regions of the logical coordinate system. When you do, those logical units map to fewer physical pixels, which means you can use smaller render targets and render fewer pixels, saving both memory and processing time. For more information, see Rendering at Different Rasterization Rates.
+
+     rasterizationRateMap {
+        ScreenSizeWidth: 4065,
+        ScreenSizeHeight: 3263
+     }
+     */
     
 #if targetEnvironment(simulator)
     renderPassDescriptor.renderTargetArrayLength = 1
@@ -877,7 +908,7 @@ func rads(_ degrees: Float) -> Float {
 @_cdecl("xrEndFrame")
 public func xrEndFrame(_ session: XrSession,
                        _ frameEndInfo: UnsafePointer<XrFrameEndInfo>?) -> XrResult {
-    print("xrEndFrame called")
+//    print("xrEndFrame")
     guard let sess = unsafeBitCast(session, to: Session?.self) else {
         return XR_ERROR_RUNTIME_FAILURE
     }
@@ -994,6 +1025,160 @@ extension Session {
     }
 }
 
+// MARK: hand tracking
+
+class HandTracker {
+    var chirality : XrHandEXT
+    var provider : HandTrackingProvider
+    var reference : WorldTrackingProvider
+    
+    init(chirality: XrHandEXT, provider : HandTrackingProvider, reference : WorldTrackingProvider) {
+        self.chirality = chirality
+        self.provider = provider
+        self.reference = reference
+    }
+}
+
+extension Session {
+    
+}
+@_cdecl("xrCreateHandTrackerEXT")
+public func xrCreateHandTrackerEXT(_ session: XrSession,
+                                     _ createInfo: UnsafePointer<XrHandTrackerCreateInfoEXT>?,
+                                   _ handTracker: UnsafeMutablePointer<XrHandTrackerEXT>?) -> XrResult {
+    print("xrCreateHandTrackerEXT")
+    guard let session = unsafeBitCast(session, to: Session?.self) else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
+    print("XrHandTrackerCreateInfoEXT:")
+    print("  type: \(createInfo!.pointee.type)")
+    print("  next: \(String(describing: createInfo!.pointee.next))")
+    print("  hand: \(createInfo!.pointee.hand)")
+    let ht = HandTracker(chirality: createInfo!.pointee.hand,
+                         provider: session.handTrackingProvider,
+                         reference: session.worldTrackingProvider)
+    
+    handTracker!.pointee = OpaquePointer(Unmanaged.passRetained(ht).toOpaque())
+    return XR_SUCCESS
+}
+
+@_cdecl("xrLocateHandJointsEXT")
+public func xrLocateHandJointsEXT(_ handTracker: XrHandTrackerEXT,
+                                  _ locateInfo: UnsafePointer<XrHandJointsLocateInfoEXT>?,
+                                  _ locations: UnsafeMutablePointer<XrHandJointLocationsEXT>?) -> XrResult {
+    print("xrLocateHandJointsEXT called")
+    
+    guard let ht = unsafeBitCast(handTracker, to: HandTracker?.self) else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
+    
+    guard let locateInfo = locateInfo, let locations = locations else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
+    
+    let info = locateInfo.pointee
+    print("XrHandJointsLocateInfoEXT:")
+    print("  type: \(info.type)")
+    print("  baseSpace: \(info.baseSpace)")
+    print("  time: \(info.time)")
+    
+    let deadlineSeconds: Double = Double(info.time) / 1_000_000_000.0
+    
+    let (leftAnchor, rightAnchor) = ht.provider.handAnchors(at: deadlineSeconds)
+    var handAnchor: HandAnchor?
+    if ht.chirality == XR_HAND_LEFT_EXT {
+        handAnchor = leftAnchor
+    } else if ht.chirality == XR_HAND_RIGHT_EXT {
+        handAnchor = rightAnchor
+    } else {
+        print("Unknown hand chirality")
+    }
+    
+    let openxrJointCount = 27
+    locations.pointee.isActive = XrBool32(handAnchor != nil ? XR_TRUE : XR_FALSE)
+    locations.pointee.jointCount = UInt32(openxrJointCount)
+    
+    // Ensure the jointLocations pointer is valid.
+    guard let jointLocationsPtr = locations.pointee.jointLocations else {
+        print("jointLocations pointer is nil")
+        return XR_ERROR_RUNTIME_FAILURE
+    }
+    
+    // Mapping of the ARKit HandJoint enum in the order corresponding to OpenXR joint indexes.
+    let jointMapping: [HandSkeleton.JointName] = [
+        .forearmArm,
+        .forearmWrist,
+        .wrist,
+        .thumbIntermediateBase,
+        .thumbIntermediateTip,
+        .thumbKnuckle,
+        .thumbTip,
+        .indexFingerIntermediateBase,
+        .indexFingerIntermediateTip,
+        .indexFingerKnuckle,
+        .indexFingerMetacarpal,
+        .indexFingerTip,
+        .middleFingerIntermediateBase,
+        .middleFingerIntermediateTip,
+        .middleFingerKnuckle,
+        .middleFingerMetacarpal,
+        .middleFingerTip,
+        .ringFingerIntermediateBase,
+        .ringFingerIntermediateTip,
+        .ringFingerKnuckle,
+        .ringFingerMetacarpal,
+        .ringFingerTip,
+        .littleFingerIntermediateBase,
+        .littleFingerIntermediateTip,
+        .littleFingerKnuckle,
+        .littleFingerMetacarpal,
+        .littleFingerTip
+    ]
+//    let reference = ht.reference.queryDeviceAnchor(atTimestamp: deadlineSeconds)
+    
+    if let handAnchor = handAnchor, let handSkeleton = handAnchor.handSkeleton {
+        for (openxrIndex, joint) in jointMapping.enumerated() {
+            var transform : simd_float4x4? = handSkeleton.joint(joint).anchorFromJointTransform
+            if transform != nil {
+                transform = handAnchor.originFromAnchorTransform * transform!
+                let orientation = transform!.orientation
+                jointLocationsPtr[openxrIndex].pose.orientation.x = orientation.vector.x
+                jointLocationsPtr[openxrIndex].pose.orientation.y = orientation.vector.y
+                jointLocationsPtr[openxrIndex].pose.orientation.z = orientation.vector.z
+                jointLocationsPtr[openxrIndex].pose.orientation.w = orientation.vector.w
+                
+                let translation = transform!.translation
+                jointLocationsPtr[openxrIndex].pose.position.x = translation.x
+                jointLocationsPtr[openxrIndex].pose.position.y = translation.y
+                jointLocationsPtr[openxrIndex].pose.position.z = translation.z
+                
+                jointLocationsPtr[openxrIndex].radius = 0.01
+                
+                jointLocationsPtr[openxrIndex].locationFlags =
+                    XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+                    XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                    XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
+                    XR_SPACE_LOCATION_POSITION_TRACKED_BIT
+            } else {
+                jointLocationsPtr[openxrIndex].locationFlags = 0
+            }
+        }
+    } else {
+        // No valid hand data; mark all joints as inactive.
+        for i in 0..<openxrJointCount {
+            jointLocationsPtr[i].locationFlags = 0
+        }
+    }
+    
+    return XR_SUCCESS
+}
+
+@_cdecl("xrDestroyHandTrackerEXT")
+public func xrDestroyHandTrackerEXT(_ handTracker: XrHandTrackerEXT) -> XrResult {
+    return XR_SUCCESS
+}
+
+// MARK: Misc
 @_cdecl("xrEnumerateApiLayerProperties")
 public func xrEnumerateApiLayerProperties(_ propertyCapacityInput: UInt32,
                                           _ propertyCountOutput: UnsafeMutablePointer<UInt32>?,
@@ -1007,27 +1192,28 @@ public func xrEnumerateInstanceExtensionProperties(_ layerName: UnsafePointer<CC
                                                    _ propertyCapacityInput: UInt32,
                                                    _ propertyCountOutput: UnsafeMutablePointer<UInt32>?,
                                                    _ properties: UnsafeMutablePointer<XrExtensionProperties>?) -> XrResult {
-    propertyCountOutput?.pointee = 2
-    if propertyCapacityInput < 1 {
+    let extensions = [
+        "XR_KHR_metal_enable",
+        "XR_KHR_composition_layer_depth",
+        "XR_EXT_hand_tracking",
+        "XR_EXT_hand_interaction"
+    ]
+    
+    propertyCountOutput?.pointee = UInt32(extensions.count)
+    if propertyCapacityInput < UInt32(extensions.count) {
         return XR_SUCCESS
     }
+    
     if let properties = properties {
-        properties[0].type = XR_TYPE_EXTENSION_PROPERTIES
-        withUnsafeMutablePointer(to: &properties[0].extensionName) { ptr in
-            ptr.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: properties[0].extensionName)) { cPtr in
-                strncpy(cPtr, "XR_KHR_metal_enable", MemoryLayout.size(ofValue: properties[0].extensionName))
+        for (index, ext) in extensions.enumerated() {
+            properties[index].type = XR_TYPE_EXTENSION_PROPERTIES
+            withUnsafeMutablePointer(to: &properties[index].extensionName) { ptr in
+                ptr.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: properties[index].extensionName)) { cPtr in
+                    strncpy(cPtr, ext, MemoryLayout.size(ofValue: properties[index].extensionName))
+                }
             }
+            properties[index].extensionVersion = 1
         }
-        properties[0].extensionVersion = 1
-        
-        
-        properties[1].type = XR_TYPE_EXTENSION_PROPERTIES
-        withUnsafeMutablePointer(to: &properties[1].extensionName) { ptr in
-            ptr.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: properties[1].extensionName)) { cPtr in
-                strncpy(cPtr, "XR_KHR_composition_layer_depth", MemoryLayout.size(ofValue: properties[1].extensionName))
-            }
-        }
-        properties[1].extensionVersion = 1
     }
     return XR_SUCCESS
 }
@@ -1169,7 +1355,8 @@ public func xrEnumerateEnvironmentBlendModes(_ instance: XrInstance,
     }
     
     if let environmentBlendModes = environmentBlendModes {
-        environmentBlendModes.pointee = XR_ENVIRONMENT_BLEND_MODE_OPAQUE
+//        environmentBlendModes.pointee = XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND
+                environmentBlendModes.pointee = XR_ENVIRONMENT_BLEND_MODE_OPAQUE
     }
     return XR_SUCCESS
 }
@@ -1287,8 +1474,21 @@ public func xrEnumerateViewConfigurationViews(_ instance: XrInstance,
         for i in 0..<Int(viewCountOutput!.pointee) {
             views[i].type = XR_TYPE_VIEW_CONFIGURATION_VIEW
             views[i].next = nil
-            views[i].recommendedImageRectWidth = 1920 // TODO get from drawable
+
+            // TODO calculate these better
+            views[i].recommendedImageRectWidth = 1920
             views[i].recommendedImageRectHeight = 1824
+            
+//            views[i].recommendedImageRectWidth = 2880
+//            views[i].recommendedImageRectHeight = 2736
+            
+            views[i].maxImageRectWidth = 4065
+            views[i].maxImageRectHeight = 3263
+            
+            // sim: drawable size: (2732,2048)
+            // dev: drawable size: (1920,1824)
+            // screen: 4065x3263
+
             // TODO maxs
             views[i].recommendedSwapchainSampleCount = 1
         }
@@ -1389,14 +1589,31 @@ public func xrGetSystemProperties(_ instance: XrInstance,
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     
-    properties.pointee.type = XR_TYPE_SYSTEM_PROPERTIES
-    properties.pointee.next = nil
-    properties.pointee.systemId = systemId
-    properties.pointee.vendorId = 0  // Dummy vendor ID
+    // Print the base system properties.
+    print("System Properties:")
+    print("  System ID: \(properties.pointee.systemId)")
+    print("  Vendor ID: \(properties.pointee.vendorId)")
+    let systemName = withUnsafePointer(to: &properties.pointee.systemName) {
+        $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: properties.pointee.systemName)) {
+            String(cString: $0)
+        }
+    }
+    print("  System Name: \(systemName)")
     
-    withUnsafeMutablePointer(to: &properties.pointee.systemName) { ptr in
-        ptr.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: properties.pointee.systemName)) { cPtr in
-            strncpy(cPtr, "TODO", MemoryLayout.size(ofValue: properties.pointee.systemName))
+    // Traverse the extension chain and print the properties found.
+    var currentExtension: UnsafeMutableRawPointer? = properties.pointee.next
+    while let extPointer = currentExtension {
+        let baseStruct = extPointer.assumingMemoryBound(to: XrBaseInStructure.self)
+        print("Found extension structure with type: \(baseStruct.pointee.type)")
+        if baseStruct.pointee.type == XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT {
+            let handTrackingProps = extPointer.assumingMemoryBound(to: XrSystemHandTrackingPropertiesEXT.self)
+            handTrackingProps.pointee.supportsHandTracking = XrBool32(XR_TRUE)
+            print("  -> XrSystemHandTrackingPropertiesEXT found, supportsHandTracking set to \(handTrackingProps.pointee.supportsHandTracking)")
+        }
+        if let next = baseStruct.pointee.next {
+            currentExtension = UnsafeMutableRawPointer(mutating: next)
+        } else {
+            currentExtension = nil
         }
     }
     
@@ -1451,7 +1668,7 @@ public func xrPathToString(_ instance: XrInstance,
 public func xrPollEvent(_ instance: XrInstance,
                         _ eventDataBuffer: UnsafeMutablePointer<XrEventDataBuffer>?) -> XrResult {
     
-    print("xrPollEvent")
+//    print("xrPollEvent")
     guard let inst = unsafeBitCast(instance, to: Instance?.self) else {
         return XR_ERROR_RUNTIME_FAILURE
     }
@@ -1584,7 +1801,7 @@ public func xrDestroySwapchain(_ swapchain: XrSwapchain) -> XrResult {
 public func xrAcquireSwapchainImage(_ swapchain: XrSwapchain,
                                     _ acquireInfo: UnsafePointer<XrSwapchainImageAcquireInfo>?,
                                     _ index: UnsafeMutablePointer<UInt32>?) -> XrResult {
-    print("xrAcquireSwapchainImage")
+//    print("xrAcquireSwapchainImage")
     
     // an ask for a swapchain image, with output param index into ones allocated by enumerate,
     
@@ -1597,7 +1814,7 @@ public func xrAcquireSwapchainImage(_ swapchain: XrSwapchain,
 @_cdecl("xrReleaseSwapchainImage")
 public func xrReleaseSwapchainImage(_ swapchain: XrSwapchain,
                                     _ releaseInfo: UnsafePointer<XrSwapchainImageReleaseInfo>?) -> XrResult {
-    print("xrReleaseSwapchainImage")
+//    print("xrReleaseSwapchainImage")
     
     return XR_SUCCESS
 }
@@ -1605,7 +1822,7 @@ public func xrReleaseSwapchainImage(_ swapchain: XrSwapchain,
 @_cdecl("xrWaitSwapchainImage")
 public func xrWaitSwapchainImage(_ swapchain: XrSwapchain,
                                  _ waitInfo: UnsafePointer<XrSwapchainImageWaitInfo>?) -> XrResult {
-    print("xrWaitSwapchainImage")
+//    print("xrWaitSwapchainImage")
     
     return XR_SUCCESS
 }
