@@ -5,6 +5,8 @@ import Darwin
 import SwiftUI
 import CompositorServices
 import OpenXRRuntime.runtime
+import GameController
+
 
 // MARK: - OpenXR Function Pointer Type Aliases
 
@@ -236,7 +238,9 @@ public func xrGetInstanceProcAddr(_ instance: XrInstance,
     }
     return XR_SUCCESS
 }
+
 // MARK: swift app stuff
+
 struct MetalLayerConfiguration: CompositorLayerConfiguration {
     func makeConfiguration(capabilities: LayerRenderer.Capabilities,
                            configuration: inout LayerRenderer.Configuration)
@@ -249,7 +253,7 @@ struct MetalLayerConfiguration: CompositorLayerConfiguration {
         
         // although we copy the user texture to the final texture, there is still benefit for foveation
         // when the user texture is bigger than the layer renderer one
-        configuration.isFoveationEnabled = supportsFoveation
+        configuration.isFoveationEnabled = false//supportsFoveation
         
         print("supportsFoveation: \(supportsFoveation)")
         configuration.colorFormat = .rgba16Float
@@ -257,12 +261,14 @@ struct MetalLayerConfiguration: CompositorLayerConfiguration {
 }
 
 public struct OpenXRScene: Scene {
-    @State  var immersionStyle: (any ImmersionStyle) = FullImmersionStyle.full
+    @State  var immersionStyle: ImmersionStyle = MixedImmersionStyle.mixed
     let onInit: ((LayerRenderer) -> Void)?
     let onAppear: (() -> Void)?
     @Binding var setImmersiveSpace: Bool
     @Binding var isLoading: Bool
     
+    @State private var controllers: [GCController] = GCController.controllers()
+
     public init(onInit: ((LayerRenderer) -> Void)?, onAppear: (() -> Void)?, setImmersiveSpace: Binding<Bool>, isLoading: Binding<Bool>) {
         self.onInit = onInit
         self.onAppear = onAppear
@@ -276,6 +282,18 @@ public struct OpenXRScene: Scene {
                 .frame(minWidth: 480, maxWidth: 480, minHeight: 200, maxHeight: 320)
                 .onAppear {
                     onAppear?()
+                    controllers = GCController.controllers()
+
+                    // Register for notifications to update the list when controllers connect/disconnect
+                    NotificationCenter.default.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { _ in
+                        controllers = GCController.controllers()
+                        print("controller connected \(controllers)")
+                    }
+                    NotificationCenter.default.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { _ in
+                        controllers = GCController.controllers()
+                        print("controller disconnected \(controllers)")
+
+                    }
                 }
         }
         .windowResizability(.contentSize)
@@ -286,7 +304,7 @@ public struct OpenXRScene: Scene {
                 print("entered immersive space")
             }
         }
-        .immersionStyle(selection: $immersionStyle, in: .mixed, .full)
+        .immersionStyle(selection: $immersionStyle, in: .full, .mixed)
         .upperLimbVisibility(.hidden)
     }
 }
@@ -339,23 +357,6 @@ struct ContentView: View {
     }
 }
 
-nonisolated(unsafe) var globalLayerRenderer: LayerRenderer? = nil
-class EventQueue {
-    var queue: [Event] = []
-    
-    func newEvent(_ event: Event) {
-        // TODO locking?
-        queue.append(event)
-    }
-    
-    func getEvent() -> Event? {
-        if queue.isEmpty {
-            return nil
-        }
-        return queue.removeFirst()
-    }
-}
-// MARK: openxr impl
 class Instance {
     var eventQueue: EventQueue
     var session: Session? // just one session for now
@@ -366,27 +367,6 @@ class Instance {
     }
 }
 
-enum Event {
-    case sessionStateChanged(state: XrSessionState)
-    
-    func fillEventDataBuffer(_ instance: Instance,  _ buffer: inout XrEventDataBuffer) {
-        switch self {
-        case .sessionStateChanged(let state):
-            // TODO this should get info from the event, not the instance
-            buffer.type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED
-            
-            print("new state: \(state)")
-            withUnsafeMutablePointer(to: &buffer) { ptr in
-                let sessionStateChangedPtr = UnsafeMutableRawPointer(ptr)
-                    .assumingMemoryBound(to: XrEventDataSessionStateChanged.self)
-                sessionStateChangedPtr.pointee.type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED
-                sessionStateChangedPtr.pointee.session = unsafeBitCast(instance.session, to: OpaquePointer.self)
-                sessionStateChangedPtr.pointee.state = state
-                sessionStateChangedPtr.pointee.time = Int64(Date().timeIntervalSince1970)
-            }
-        }
-    }
-}
 
 class Session {
     let metalDevice: MTLDevice
@@ -418,29 +398,11 @@ class Session {
     var swapchain: [Swapchain]
     var timing: LayerRenderer.Frame.Timing?
     var currentFrame: LayerRenderer.Frame?
+    var lastGoodDeviceAnchor : DeviceAnchor?
 }
 
-class Swapchain {
-    var textures: [MTLTexture]
-    
-    init(textures: [MTLTexture]) {
-        self.textures = textures
-    }
-}
+// MARK: rendering
 
-
-@_cdecl("xrCreateInstance")
-public func xrCreateInstance(_ createInfo: UnsafePointer<XrInstanceCreateInfo>?,
-                             _ instance: UnsafeMutablePointer<XrInstance>?) -> XrResult {
-    print("xrCreateInstance called")
-    guard let instanceOut = instance else {
-        return XR_ERROR_FUNCTION_UNSUPPORTED
-    }
-    
-    let instance = Instance()
-    instanceOut.pointee = OpaquePointer(Unmanaged.passRetained(instance).toOpaque())
-    return XR_SUCCESS
-}
 extension Instance {
     func createSession() -> Session? {
         if self.session != nil { // only support one session at the moment
@@ -460,13 +422,40 @@ extension Instance {
         return session
     }
 }
+
+@_cdecl("xrCreateInstance")
+public func xrCreateInstance(_ createInfo: UnsafePointer<XrInstanceCreateInfo>?,
+                             _ instance: UnsafeMutablePointer<XrInstance>?) -> XrResult {
+    print("xrCreateInstance called")
+    guard let instanceOut = instance else {
+        return XR_ERROR_FUNCTION_UNSUPPORTED
+    }
+    
+    let instance = Instance()
+    instanceOut.pointee = OpaquePointer(Unmanaged.passRetained(instance).toOpaque())
+    return XR_SUCCESS
+}
+
+
+@_cdecl("xrDestroyInstance")
+public func xrDestroyInstance(_ instance: XrInstance) -> XrResult {
+    print("xrDestroyInstance")
+    let rawPtr = unsafeBitCast(instance, to: UnsafeMutableRawPointer.self)
+    rawPtr.deallocate()
+    return XR_SUCCESS
+}
+
 extension Session {
     func setupSession() {
         Task {
             do {
                 globalLayerRenderer!.waitUntilRunning()
                 
-                let dataProviders: [DataProvider] = [self.worldTrackingProvider, self.handTrackingProvider]
+                var dataProviders: [DataProvider] = [self.worldTrackingProvider]
+                
+                if HandTrackingProvider.isSupported {
+                    dataProviders.append(self.handTrackingProvider)
+                }
                 try await self.arSession.run(dataProviders)
                 while (true) {
                     guard self.worldTrackingProvider.state != .running else { break }
@@ -516,6 +505,75 @@ public func xrCreateSession(_ instance: XrInstance,
     return XR_SUCCESS
 }
 
+@_cdecl("xrDestroySession")
+public func xrDestroySession(_ session: XrSession) -> XrResult {
+    print("xrDestroySession")
+    let rawPtr = unsafeBitCast(session, to: UnsafeMutableRawPointer.self)
+    rawPtr.deallocate()
+    return XR_SUCCESS
+}
+
+var globalLayerRenderer: LayerRenderer? = nil
+class EventQueue {
+    var queue: [Event] = []
+    
+    func newEvent(_ event: Event) {
+        // TODO locking?
+        queue.append(event)
+    }
+    
+    func getEvent() -> Event? {
+        if queue.isEmpty {
+            return nil
+        }
+        return queue.removeFirst()
+    }
+}
+
+enum Event {
+    case sessionStateChanged(state: XrSessionState)
+    
+    func fillEventDataBuffer(_ instance: Instance,  _ buffer: inout XrEventDataBuffer) {
+        switch self {
+        case .sessionStateChanged(let state):
+            // TODO this should get info from the event, not the instance
+            buffer.type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED
+            
+            print("new state: \(state)")
+            withUnsafeMutablePointer(to: &buffer) { ptr in
+                let sessionStateChangedPtr = UnsafeMutableRawPointer(ptr)
+                    .assumingMemoryBound(to: XrEventDataSessionStateChanged.self)
+                sessionStateChangedPtr.pointee.type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED
+                sessionStateChangedPtr.pointee.session = unsafeBitCast(instance.session, to: OpaquePointer.self)
+                sessionStateChangedPtr.pointee.state = state
+                sessionStateChangedPtr.pointee.time = Int64(Date().timeIntervalSince1970)
+            }
+        }
+    }
+}
+
+@_cdecl("xrPollEvent")
+public func xrPollEvent(_ instance: XrInstance,
+                        _ eventDataBuffer: UnsafeMutablePointer<XrEventDataBuffer>?) -> XrResult {
+    
+//    print("xrPollEvent")
+    guard let inst = unsafeBitCast(instance, to: Instance?.self) else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
+    
+    if let event = inst.eventQueue.getEvent() {
+        print("xrPollEvent returning event")
+        if var buffer = eventDataBuffer?.pointee {
+            event.fillEventDataBuffer(inst, &buffer)
+            eventDataBuffer?.pointee = buffer
+        }
+        return XR_SUCCESS
+    }
+    
+    eventDataBuffer?.pointee.type = XrStructureType(0)
+    return XR_EVENT_UNAVAILABLE
+}
+
 func printDeviceAnchorState(_ anchor: DeviceAnchor) {
     print("Device Anchor State:")
     print("ID: \(anchor.id)")
@@ -562,7 +620,7 @@ public func xrWaitFrame(_ session: XrSession,
 
     let (seconds, attoseconds) = LayerRenderer.Clock.Instant.epoch.duration(to: deadline).components
     let deadlineNanos: Int64 = Int64(seconds) * 1_000_000_000 + Int64(attoseconds / 1_000_000_000)
-
+//    print("deadline \(Double(deadlineNanos)/1e9)")
     frameState.pointee.type = XR_TYPE_FRAME_STATE
     frameState.pointee.next = nil
 
@@ -572,6 +630,9 @@ public func xrWaitFrame(_ session: XrSession,
 
     // although godot seems to call xrwaitframe before doing update(), i don't think its supposed to
     // sess.currentFrame!.startUpdate()
+    
+    LayerRenderer.Clock().wait(until:sess.timing!.optimalInputTime)
+    
     return XR_SUCCESS
 }
 
@@ -623,24 +684,26 @@ public func xrLocateViews(_ session: XrSession,
     guard let sess = unsafeBitCast(session, to: Session?.self) else {
         return XR_ERROR_RUNTIME_FAILURE
     }
-    
-    
+
+    // TODO returns nil if minimised
     let drawable = sess.currentFrame!.queryDrawable()!
 //    print("drawable size: (\(drawable.colorTextures[0].width),\(drawable.colorTextures[0].height))")
     
-//    let timestamp = CACurrentMediaTime()
     let (seconds, attoseconds) = LayerRenderer.Clock.Instant.epoch.duration(to: drawable.frameTiming.presentationTime).components
     let presentationTime: Double = Double(seconds) + Double(attoseconds) * 1e-18
-    guard let deviceAnchor = sess.worldTrackingProvider.queryDeviceAnchor(atTimestamp: presentationTime) else {
-        print("No device anchor available")
-        return XR_ERROR_RUNTIME_FAILURE
-    }
-    if !deviceAnchor.isTracked {
+    var deviceAnchor = sess.worldTrackingProvider.queryDeviceAnchor(atTimestamp: presentationTime)
+    if deviceAnchor == nil {
+        print("No device anchor available at \(presentationTime)")
+        drawable.deviceAnchor = sess.lastGoodDeviceAnchor
+        deviceAnchor = sess.lastGoodDeviceAnchor
+    } else if !deviceAnchor!.isTracked {
         print("Device anchor is not tracked")
-        return XR_ERROR_RUNTIME_FAILURE
+        drawable.deviceAnchor = sess.lastGoodDeviceAnchor
+        deviceAnchor = sess.lastGoodDeviceAnchor
+    } else {
+        drawable.deviceAnchor = deviceAnchor
+        sess.lastGoodDeviceAnchor = deviceAnchor
     }
-    
-    drawable.deviceAnchor = deviceAnchor
     
     let viewCount = drawable.views.count
     viewCountOutput?.pointee = UInt32(viewCount)
@@ -659,7 +722,7 @@ public func xrLocateViews(_ session: XrSession,
     if let views = views {
         for i in 0..<viewCount {
             let view = drawable.views[i]
-            let viewMatrix = (deviceAnchor.originFromAnchorTransform*view.transform)
+            let viewMatrix = (deviceAnchor!.originFromAnchorTransform*view.transform)
             
             let translation = viewMatrix.translation
             let orientation = viewMatrix.orientation
@@ -694,11 +757,6 @@ public func xrBeginFrame(_ session: XrSession,
     }
     
     if let currentFrame = sess.currentFrame {
-        // currentFrame.endUpdate()
-        
-        // TODO should wait as per apple docs, but shouldn't wait as per openxr, maybe there's another api we should wait in?
-        LayerRenderer.Clock().wait(until:sess.timing!.optimalInputTime)
-        
         currentFrame.startSubmission()
     } else {
         print("null currentframe eh")
@@ -843,7 +901,7 @@ func drawSwapchainTextureToDrawable(renderer: Renderer,
     
     renderPassDescriptor.rasterizationRateMap = output.rasterizationRateMaps.first
     /*
-     By default, a render pass doesn’t have a rasterization rate map, and the viewport coordinate system maps exactly to physical pixels in the targeted textures. If you apply a rasterization rate map to a render pass, the viewport coordinate system becomes a logical coordinate system, and the rate map describes how to map logical coordinates to physical pixels in the render pass’s targets. You can specify different rasterization rates in different regions of the logical coordinate system. When you do, those logical units map to fewer physical pixels, which means you can use smaller render targets and render fewer pixels, saving both memory and processing time. For more information, see Rendering at Different Rasterization Rates.
+      "By default, a render pass doesn’t have a rasterization rate map, and the viewport coordinate system maps exactly to physical pixels in the targeted textures. If you apply a rasterization rate map to a render pass, the viewport coordinate system becomes a logical coordinate system, and the rate map describes how to map logical coordinates to physical pixels in the render pass’s targets. You can specify different rasterization rates in different regions of the logical coordinate system. When you do, those logical units map to fewer physical pixels, which means you can use smaller render targets and render fewer pixels, saving both memory and processing time. For more information, see Rendering at Different Rasterization Rates."
 
      rasterizationRateMap {
         ScreenSizeWidth: 4065,
@@ -896,7 +954,22 @@ func rads(_ degrees: Float) -> Float {
     return (degrees / 360) * 2*Float.pi
 }
 
+@_cdecl("xrBeginSession")
+public func xrBeginSession(_ xrsession: XrSession,
+                           _ beginInfo: UnsafePointer<XrSessionBeginInfo>?) -> XrResult {
+    print("xrBeginSession")
+    
+//    guard let session = unsafeBitCast(xrsession, to: Session?.self) else {
+//        return XR_ERROR_RUNTIME_FAILURE
+//    }
+    return XR_SUCCESS
+}
 
+@_cdecl("xrEndSession")
+public func xrEndSession(_ session: XrSession) -> XrResult {
+    print("xrEndSession")
+    return XR_SUCCESS
+}
 @_cdecl("xrEndFrame")
 public func xrEndFrame(_ session: XrSession,
                        _ frameEndInfo: UnsafePointer<XrFrameEndInfo>?) -> XrResult {
@@ -907,6 +980,11 @@ public func xrEndFrame(_ session: XrSession,
     
     guard let info = frameEndInfo?.pointee else {
         print("No frame end info provided")
+        return XR_ERROR_RUNTIME_FAILURE
+    }
+    
+    if sess.currentFrame!.queryDrawable()!.deviceAnchor == nil {
+        print("failed to get device anchor")
         return XR_ERROR_RUNTIME_FAILURE
     }
     
@@ -1015,6 +1093,114 @@ extension Session {
         self.currentFrame!.endSubmission()
         self.currentFrame = nil
     }
+}
+
+@_cdecl("xrEnumerateViewConfigurations")
+public func xrEnumerateViewConfigurations(_ instance: XrInstance,
+                                          _ systemId: XrSystemId,
+                                          _ viewConfigurationTypeCapacityInput: UInt32,
+                                          _ viewConfigurationTypeCountOutput: UnsafeMutablePointer<UInt32>?,
+                                          _ viewConfigurationTypes: UnsafeMutablePointer<XrViewConfigurationType>?) -> XrResult {
+    print("xrEnumerateViewConfigurations")
+    // TODO
+#if targetEnvironment(simulator)
+    viewConfigurationTypeCountOutput?.pointee = 1
+#else
+    viewConfigurationTypeCountOutput?.pointee = 2
+#endif
+    if viewConfigurationTypeCapacityInput < 1 {
+        return XR_SUCCESS
+    }
+    if let viewConfigurationTypes = viewConfigurationTypes {
+        for i in 0..<Int(viewConfigurationTypeCountOutput!.pointee) {
+            viewConfigurationTypes[i] = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO
+        }
+    }
+    return XR_SUCCESS
+}
+
+@_cdecl("xrEnumerateViewConfigurationViews")
+public func xrEnumerateViewConfigurationViews(_ instance: XrInstance,
+                                              _ systemId: XrSystemId,
+                                              _ viewConfigurationType: XrViewConfigurationType,
+                                              _ viewCapacityInput: UInt32,
+                                              _ viewCountOutput: UnsafeMutablePointer<UInt32>?,
+                                              _ views: UnsafeMutablePointer<XrViewConfigurationView>?) -> XrResult {
+    // TODO
+#if targetEnvironment(simulator)
+    viewCountOutput?.pointee = 1
+#else
+    viewCountOutput?.pointee = 2
+#endif
+    
+    if viewCapacityInput < 1 {
+        return XR_SUCCESS
+    }
+    
+    if let views = views {
+        for i in 0..<Int(viewCountOutput!.pointee) {
+            views[i].type = XR_TYPE_VIEW_CONFIGURATION_VIEW
+            views[i].next = nil
+
+            // TODO calculate these better
+            views[i].recommendedImageRectWidth = 1920
+            views[i].recommendedImageRectHeight = 1824
+            
+//            views[i].recommendedImageRectWidth = 2880
+//            views[i].recommendedImageRectHeight = 2736
+            
+            views[i].maxImageRectWidth = 4065
+            views[i].maxImageRectHeight = 3263
+            
+            // sim: drawable size: (2732,2048)
+            // dev: drawable size: (1920,1824)
+            // screen: 4065x3263
+
+            // TODO maxs
+            views[i].recommendedSwapchainSampleCount = 1
+        }
+    }
+    return XR_SUCCESS
+}
+
+@_cdecl("xrEnumerateEnvironmentBlendModes")
+public func xrEnumerateEnvironmentBlendModes(_ instance: XrInstance,
+                                             _ systemId: XrSystemId,
+                                             _ viewConfigurationType: XrViewConfigurationType,
+                                             _ environmentBlendModeCapacityInput: UInt32,
+                                             _ environmentBlendModeCountOutput: UnsafeMutablePointer<UInt32>?,
+                                             _ environmentBlendModes: UnsafeMutablePointer<XrEnvironmentBlendMode>?) -> XrResult {
+    environmentBlendModeCountOutput?.pointee = 1
+    
+    if environmentBlendModeCapacityInput < 1 {
+        return XR_SUCCESS
+    }
+    
+    if let environmentBlendModes = environmentBlendModes {
+        environmentBlendModes.pointee = XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND
+    }
+    return XR_SUCCESS
+}
+
+@_cdecl("xrGetMetalGraphicsRequirementsKHR")
+public func xrGetMetalGraphicsRequirementsKHR(_ instance: XrInstance,
+                                              _ systemId: XrSystemId,
+                                              _ metalRequirements: UnsafeMutablePointer<XrGraphicsRequirementsMetalKHR>?) -> XrResult {
+    guard let metalRequirements = metalRequirements else {
+        return XR_ERROR_FUNCTION_UNSUPPORTED
+    }
+    
+    guard let inst = unsafeBitCast(instance, to: Instance?.self) else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
+    
+    
+    metalRequirements.pointee.type = XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR
+    metalRequirements.pointee.next = nil
+    
+    metalRequirements.pointee.metalDevice = Unmanaged.passUnretained(inst.metalDevice).toOpaque()
+    
+    return XR_SUCCESS
 }
 
 // MARK: hand tracking
@@ -1189,6 +1375,7 @@ public func xrDestroyHandTrackerEXT(_ handTracker: XrHandTrackerEXT) -> XrResult
 }
 
 // MARK: Misc
+
 @_cdecl("xrEnumerateApiLayerProperties")
 public func xrEnumerateApiLayerProperties(_ propertyCapacityInput: UInt32,
                                           _ propertyCountOutput: UnsafeMutablePointer<UInt32>?,
@@ -1245,66 +1432,85 @@ public func xrGetInstanceProperties(_ instance: XrInstance,
     return XR_SUCCESS
 }
 
-@_cdecl("xrGetMetalGraphicsRequirementsKHR")
-public func xrGetMetalGraphicsRequirementsKHR(_ instance: XrInstance,
-                                              _ systemId: XrSystemId,
-                                              _ metalRequirements: UnsafeMutablePointer<XrGraphicsRequirementsMetalKHR>?) -> XrResult {
-    guard let metalRequirements = metalRequirements else {
+
+@_cdecl("xrGetSystem")
+public func xrGetSystem(_ instance: XrInstance,
+                        _ getInfo: UnsafePointer<XrSystemGetInfo>?,
+                        _ systemId: UnsafeMutablePointer<XrSystemId>?) -> XrResult {
+    guard let systemId = systemId else {
+        return XR_ERROR_FUNCTION_UNSUPPORTED
+    }
+    systemId.pointee = 1
+    return XR_SUCCESS
+}
+
+@_cdecl("xrGetSystemProperties")
+public func xrGetSystemProperties(_ instance: XrInstance,
+                                  _ systemId: XrSystemId,
+                                  _ properties: UnsafeMutablePointer<XrSystemProperties>?) -> XrResult {
+    guard let properties = properties else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     
-    guard let inst = unsafeBitCast(instance, to: Instance?.self) else {
-        return XR_ERROR_RUNTIME_FAILURE
+    // Print the base system properties.
+    print("System Properties:")
+    print("  System ID: \(properties.pointee.systemId)")
+    print("  Vendor ID: \(properties.pointee.vendorId)")
+    let systemName = withUnsafePointer(to: &properties.pointee.systemName) {
+        $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: properties.pointee.systemName)) {
+            String(cString: $0)
+        }
+    }
+    print("  System Name: \(systemName)")
+    
+    // Traverse the extension chain and print the properties found.
+    var currentExtension: UnsafeMutableRawPointer? = properties.pointee.next
+    while let extPointer = currentExtension {
+        let baseStruct = extPointer.assumingMemoryBound(to: XrBaseInStructure.self)
+        print("Found extension structure with type: \(baseStruct.pointee.type)")
+        if baseStruct.pointee.type == XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT {
+            let handTrackingProps = extPointer.assumingMemoryBound(to: XrSystemHandTrackingPropertiesEXT.self)
+            handTrackingProps.pointee.supportsHandTracking = XrBool32(XR_TRUE)
+            print("  -> XrSystemHandTrackingPropertiesEXT found, supportsHandTracking set to \(handTrackingProps.pointee.supportsHandTracking)")
+        }
+        if let next = baseStruct.pointee.next {
+            currentExtension = UnsafeMutableRawPointer(mutating: next)
+        } else {
+            currentExtension = nil
+        }
     }
     
-    
-    metalRequirements.pointee.type = XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR
-    metalRequirements.pointee.next = nil
-    
-    metalRequirements.pointee.metalDevice = Unmanaged.passUnretained(inst.metalDevice).toOpaque()
-    
     return XR_SUCCESS
 }
 
-@_cdecl("xrApplyHapticFeedback")
-public func xrApplyHapticFeedback(_ session: XrSession,
-                                  _ hapticActionInfo: UnsafePointer<XrHapticActionInfo>?,
-                                  _ hapticFeedback: UnsafePointer<XrHapticBaseHeader>?) -> XrResult {
-    return XR_SUCCESS
-}
-
-@_cdecl("xrAttachSessionActionSets")
-public func xrAttachSessionActionSets(_ session: XrSession,
-                                      _ attachInfo: UnsafePointer<XrSessionActionSetsAttachInfo>?) -> XrResult {
-    print("xrAttachSessionActionSets")
-    return XR_SUCCESS
-}
-
-@_cdecl("xrBeginSession")
-public func xrBeginSession(_ xrsession: XrSession,
-                           _ beginInfo: UnsafePointer<XrSessionBeginInfo>?) -> XrResult {
-    print("xrBeginSession")
-    
-//    guard let session = unsafeBitCast(xrsession, to: Session?.self) else {
-//        return XR_ERROR_RUNTIME_FAILURE
-//    }
-    return XR_SUCCESS
-}
-
-@_cdecl("xrCreateAction")
-public func xrCreateAction(_ actionSet: XrActionSet,
-                           _ createInfo: UnsafePointer<XrActionCreateInfo>?,
-                           _ action: UnsafeMutablePointer<XrAction>?) -> XrResult {
-    print("xrCreateAction")
-    guard let actionOut = action else {
-        return XR_ERROR_FUNCTION_UNSUPPORTED
+@_cdecl("xrResultToString")
+public func xrResultToString(_ instance: XrInstance,
+                             _ result: XrResult,
+                             _ buffer: UnsafeMutablePointer<CChar>?) -> XrResult {
+    // TODO
+    let resultString: String
+    switch result {
+    case XR_SUCCESS:
+        resultString = "XR_SUCCESS"
+    case XR_ERROR_FUNCTION_UNSUPPORTED:
+        resultString = "XR_ERROR_FUNCTION_UNSUPPORTED"
+    default:
+        resultString = "XR_UNKNOWN_RESULT"
     }
-    let dummyActionPtr = UnsafeMutableRawPointer.allocate(byteCount: MemoryLayout<Int>.size,
-                                                          alignment: MemoryLayout<Int>.alignment)
-    dummyActionPtr.initializeMemory(as: Int.self, to: 42) // dummy value
-    actionOut.pointee = OpaquePointer(dummyActionPtr)
+    
+    let requiredSize = UInt32(resultString.utf8.count + 1)
+    
+    if XR_MAX_RESULT_STRING_SIZE >= requiredSize, let buffer = buffer {
+        resultString.withCString { src in
+            strncpy(buffer, src, Int(XR_MAX_RESULT_STRING_SIZE))
+        }
+    }
+    
     return XR_SUCCESS
 }
+
+
+// MARK: controllers
 
 @_cdecl("xrCreateActionSet")
 public func xrCreateActionSet(_ instance: XrInstance,
@@ -1321,6 +1527,48 @@ public func xrCreateActionSet(_ instance: XrInstance,
     return XR_SUCCESS
 }
 
+@_cdecl("xrDestroyActionSet")
+public func xrDestroyActionSet(_ actionSet: XrActionSet) -> XrResult {
+    print("xrDestroyActionSet")
+    let rawPtr = unsafeBitCast(actionSet, to: UnsafeMutableRawPointer.self)
+    rawPtr.deallocate()
+    return XR_SUCCESS
+}
+
+
+@_cdecl("xrAttachSessionActionSets")
+public func xrAttachSessionActionSets(_ session: XrSession,
+                                      _ attachInfo: UnsafePointer<XrSessionActionSetsAttachInfo>?) -> XrResult {
+    print("xrAttachSessionActionSets")
+    return XR_SUCCESS
+}
+
+
+
+@_cdecl("xrCreateAction")
+public func xrCreateAction(_ actionSet: XrActionSet,
+                           _ createInfo: UnsafePointer<XrActionCreateInfo>?,
+                           _ action: UnsafeMutablePointer<XrAction>?) -> XrResult {
+    print("xrCreateAction")
+    guard let actionOut = action else {
+        return XR_ERROR_FUNCTION_UNSUPPORTED
+    }
+    let dummyActionPtr = UnsafeMutableRawPointer.allocate(byteCount: MemoryLayout<Int>.size,
+                                                          alignment: MemoryLayout<Int>.alignment)
+    dummyActionPtr.initializeMemory(as: Int.self, to: 42) // dummy value
+    actionOut.pointee = OpaquePointer(dummyActionPtr)
+    return XR_SUCCESS
+}
+
+@_cdecl("xrDestroyAction")
+public func xrDestroyAction(_ action: XrAction) -> XrResult {
+    print("xrDestroyAction")
+    let rawPtr = unsafeBitCast(action, to: UnsafeMutableRawPointer.self)
+    rawPtr.deallocate()
+    return XR_SUCCESS
+}
+
+
 @_cdecl("xrCreateActionSpace")
 public func xrCreateActionSpace(_ session: XrSession,
                                 _ createInfo: UnsafePointer<XrActionSpaceCreateInfo>?,
@@ -1333,176 +1581,6 @@ public func xrCreateActionSpace(_ session: XrSession,
                                                          alignment: MemoryLayout<Int>.alignment)
     dummySpacePtr.initializeMemory(as: Int.self, to: 128) // dummy value for action space
     spaceOut.pointee = OpaquePointer(dummySpacePtr)
-    return XR_SUCCESS
-}
-
-@_cdecl("xrCreateReferenceSpace")
-public func xrCreateReferenceSpace(_ session: XrSession,
-                                   _ createInfo: UnsafePointer<XrReferenceSpaceCreateInfo>?,
-                                   _ space: UnsafeMutablePointer<XrSpace>?) -> XrResult {
-    print("xrCreateReferenceSpace")
-    guard let spaceOut = space else {
-        return XR_ERROR_FUNCTION_UNSUPPORTED
-    }
-    let dummySpacePtr = UnsafeMutableRawPointer.allocate(byteCount: MemoryLayout<Int>.size,
-                                                         alignment: MemoryLayout<Int>.alignment)
-    dummySpacePtr.initializeMemory(as: Int.self, to: 256) // dummy value for reference space
-    spaceOut.pointee = OpaquePointer(dummySpacePtr)
-    return XR_SUCCESS
-}
-
-@_cdecl("xrEnumerateEnvironmentBlendModes")
-public func xrEnumerateEnvironmentBlendModes(_ instance: XrInstance,
-                                             _ systemId: XrSystemId,
-                                             _ viewConfigurationType: XrViewConfigurationType,
-                                             _ environmentBlendModeCapacityInput: UInt32,
-                                             _ environmentBlendModeCountOutput: UnsafeMutablePointer<UInt32>?,
-                                             _ environmentBlendModes: UnsafeMutablePointer<XrEnvironmentBlendMode>?) -> XrResult {
-    environmentBlendModeCountOutput?.pointee = 1
-    
-    if environmentBlendModeCapacityInput < 1 {
-        return XR_SUCCESS
-    }
-    
-    if let environmentBlendModes = environmentBlendModes {
-//        environmentBlendModes.pointee = XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND
-                environmentBlendModes.pointee = XR_ENVIRONMENT_BLEND_MODE_OPAQUE
-    }
-    return XR_SUCCESS
-}
-
-@_cdecl("xrDestroyAction")
-public func xrDestroyAction(_ action: XrAction) -> XrResult {
-    print("xrDestroyAction")
-    let rawPtr = unsafeBitCast(action, to: UnsafeMutableRawPointer.self)
-    rawPtr.deallocate()
-    return XR_SUCCESS
-}
-
-@_cdecl("xrDestroyActionSet")
-public func xrDestroyActionSet(_ actionSet: XrActionSet) -> XrResult {
-    print("xrDestroyActionSet")
-    let rawPtr = unsafeBitCast(actionSet, to: UnsafeMutableRawPointer.self)
-    rawPtr.deallocate()
-    return XR_SUCCESS
-}
-
-@_cdecl("xrDestroyInstance")
-public func xrDestroyInstance(_ instance: XrInstance) -> XrResult {
-    print("xrDestroyInstance")
-    let rawPtr = unsafeBitCast(instance, to: UnsafeMutableRawPointer.self)
-    rawPtr.deallocate()
-    return XR_SUCCESS
-}
-
-@_cdecl("xrDestroySession")
-public func xrDestroySession(_ session: XrSession) -> XrResult {
-    print("xrDestroySession")
-    let rawPtr = unsafeBitCast(session, to: UnsafeMutableRawPointer.self)
-    rawPtr.deallocate()
-    return XR_SUCCESS
-}
-
-@_cdecl("xrDestroySpace")
-public func xrDestroySpace(_ space: XrSpace) -> XrResult {
-    print("xrDestroySpace")
-    let rawPtr = unsafeBitCast(space, to: UnsafeMutableRawPointer.self)
-    rawPtr.deallocate()
-    return XR_SUCCESS
-}
-
-@_cdecl("xrEndSession")
-public func xrEndSession(_ session: XrSession) -> XrResult {
-    print("xrEndSession")
-    return XR_SUCCESS
-}
-
-@_cdecl("xrEnumerateReferenceSpaces")
-public func xrEnumerateReferenceSpaces(_ session: XrSession,
-                                       _ referenceSpaceTypeCapacityInput: UInt32,
-                                       _ referenceSpaceTypeCountOutput: UnsafeMutablePointer<UInt32>?,
-                                       _ referenceSpaceTypes: UnsafeMutablePointer<XrReferenceSpaceType>?) -> XrResult {
-    print("xrEnumerateReferenceSpaces")
-    let availableReferenceSpaces: [XrReferenceSpaceType] = [
-        XR_REFERENCE_SPACE_TYPE_STAGE,
-        XR_REFERENCE_SPACE_TYPE_LOCAL,
-        XR_REFERENCE_SPACE_TYPE_VIEW
-    ]
-    referenceSpaceTypeCountOutput?.pointee = UInt32(availableReferenceSpaces.count)
-    if referenceSpaceTypeCapacityInput < availableReferenceSpaces.count {
-        return XR_SUCCESS
-    }
-    if let referenceSpaceTypes = referenceSpaceTypes {
-        referenceSpaceTypes.update(from: availableReferenceSpaces, count: availableReferenceSpaces.count)
-    }
-    return XR_SUCCESS
-}
-
-@_cdecl("xrEnumerateViewConfigurations")
-public func xrEnumerateViewConfigurations(_ instance: XrInstance,
-                                          _ systemId: XrSystemId,
-                                          _ viewConfigurationTypeCapacityInput: UInt32,
-                                          _ viewConfigurationTypeCountOutput: UnsafeMutablePointer<UInt32>?,
-                                          _ viewConfigurationTypes: UnsafeMutablePointer<XrViewConfigurationType>?) -> XrResult {
-    print("xrEnumerateViewConfigurations")
-    // TODO
-#if targetEnvironment(simulator)
-    viewConfigurationTypeCountOutput?.pointee = 1
-#else
-    viewConfigurationTypeCountOutput?.pointee = 2
-#endif
-    if viewConfigurationTypeCapacityInput < 1 {
-        return XR_SUCCESS
-    }
-    if let viewConfigurationTypes = viewConfigurationTypes {
-        for i in 0..<Int(viewConfigurationTypeCountOutput!.pointee) {
-            viewConfigurationTypes[i] = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO
-        }
-    }
-    return XR_SUCCESS
-}
-
-@_cdecl("xrEnumerateViewConfigurationViews")
-public func xrEnumerateViewConfigurationViews(_ instance: XrInstance,
-                                              _ systemId: XrSystemId,
-                                              _ viewConfigurationType: XrViewConfigurationType,
-                                              _ viewCapacityInput: UInt32,
-                                              _ viewCountOutput: UnsafeMutablePointer<UInt32>?,
-                                              _ views: UnsafeMutablePointer<XrViewConfigurationView>?) -> XrResult {
-    // TODO
-#if targetEnvironment(simulator)
-    viewCountOutput?.pointee = 1
-#else
-    viewCountOutput?.pointee = 2
-#endif
-    
-    if viewCapacityInput < 1 {
-        return XR_SUCCESS
-    }
-    
-    if let views = views {
-        for i in 0..<Int(viewCountOutput!.pointee) {
-            views[i].type = XR_TYPE_VIEW_CONFIGURATION_VIEW
-            views[i].next = nil
-
-            // TODO calculate these better
-            views[i].recommendedImageRectWidth = 1920
-            views[i].recommendedImageRectHeight = 1824
-            
-//            views[i].recommendedImageRectWidth = 2880
-//            views[i].recommendedImageRectHeight = 2736
-            
-            views[i].maxImageRectWidth = 4065
-            views[i].maxImageRectHeight = 3263
-            
-            // sim: drawable size: (2732,2048)
-            // dev: drawable size: (1920,1824)
-            // screen: 4065x3263
-
-            // TODO maxs
-            views[i].recommendedSwapchainSampleCount = 1
-        }
-    }
     return XR_SUCCESS
 }
 
@@ -1562,94 +1640,33 @@ public func xrGetCurrentInteractionProfile(_ session: XrSession,
     return XR_SUCCESS
 }
 
-@_cdecl("xrGetReferenceSpaceBoundsRect")
-public func xrGetReferenceSpaceBoundsRect(_ session: XrSession,
-                                          _ referenceSpaceType: XrReferenceSpaceType,
-                                          _ bounds: UnsafeMutablePointer<XrExtent2Df>?) -> XrResult {
-    if referenceSpaceType == XR_REFERENCE_SPACE_TYPE_STAGE {
-        if let bounds = bounds {
-            bounds.pointee.width = 2.0
-            bounds.pointee.height = 2.0
-        }
-    } else {
-        if let bounds = bounds {
-            bounds.pointee.width = 0.0
-            bounds.pointee.height = 0.0
-        }
-    }
+@_cdecl("xrSyncActions")
+public func xrSyncActions(_ session: XrSession, _ syncInfo: UnsafePointer<XrActionsSyncInfo>?) -> XrResult {
     return XR_SUCCESS
 }
 
-@_cdecl("xrGetSystem")
-public func xrGetSystem(_ instance: XrInstance,
-                        _ getInfo: UnsafePointer<XrSystemGetInfo>?,
-                        _ systemId: UnsafeMutablePointer<XrSystemId>?) -> XrResult {
-    guard let systemId = systemId else {
-        return XR_ERROR_FUNCTION_UNSUPPORTED
-    }
-    systemId.pointee = 1
+@_cdecl("xrApplyHapticFeedback")
+public func xrApplyHapticFeedback(_ session: XrSession,
+                                  _ hapticActionInfo: UnsafePointer<XrHapticActionInfo>?,
+                                  _ hapticFeedback: UnsafePointer<XrHapticBaseHeader>?) -> XrResult {
     return XR_SUCCESS
 }
 
-@_cdecl("xrGetSystemProperties")
-public func xrGetSystemProperties(_ instance: XrInstance,
-                                  _ systemId: XrSystemId,
-                                  _ properties: UnsafeMutablePointer<XrSystemProperties>?) -> XrResult {
-    guard let properties = properties else {
-        return XR_ERROR_FUNCTION_UNSUPPORTED
-    }
-    
-    // Print the base system properties.
-    print("System Properties:")
-    print("  System ID: \(properties.pointee.systemId)")
-    print("  Vendor ID: \(properties.pointee.vendorId)")
-    let systemName = withUnsafePointer(to: &properties.pointee.systemName) {
-        $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: properties.pointee.systemName)) {
-            String(cString: $0)
-        }
-    }
-    print("  System Name: \(systemName)")
-    
-    // Traverse the extension chain and print the properties found.
-    var currentExtension: UnsafeMutableRawPointer? = properties.pointee.next
-    while let extPointer = currentExtension {
-        let baseStruct = extPointer.assumingMemoryBound(to: XrBaseInStructure.self)
-        print("Found extension structure with type: \(baseStruct.pointee.type)")
-        if baseStruct.pointee.type == XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT {
-            let handTrackingProps = extPointer.assumingMemoryBound(to: XrSystemHandTrackingPropertiesEXT.self)
-            handTrackingProps.pointee.supportsHandTracking = XrBool32(XR_TRUE)
-            print("  -> XrSystemHandTrackingPropertiesEXT found, supportsHandTracking set to \(handTrackingProps.pointee.supportsHandTracking)")
-        }
-        if let next = baseStruct.pointee.next {
-            currentExtension = UnsafeMutableRawPointer(mutating: next)
-        } else {
-            currentExtension = nil
-        }
-    }
-    
+@_cdecl("xrSuggestInteractionProfileBindings")
+public func xrSuggestInteractionProfileBindings(_ instance: XrInstance,
+                                                _ suggestedBindings: UnsafePointer<XrInteractionProfileSuggestedBinding>?) -> XrResult {
+    print("xrSuggestInteractionProfileBindings called")
     return XR_SUCCESS
 }
 
-@_cdecl("xrLocateSpace")
-public func xrLocateSpace(_ space: XrSpace,
-                          _ baseSpace: XrSpace,
-                          _ time: XrTime,
-                          _ location: UnsafeMutablePointer<XrSpaceLocation>?) -> XrResult {
-    guard let location = location else {
+@_cdecl("xrStringToPath")
+public func xrStringToPath(_ instance: XrInstance,
+                           _ pathString: UnsafePointer<CChar>?,
+                           _ path: UnsafeMutablePointer<XrPath>?) -> XrResult {
+    guard let _ = pathString, let path = path else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
-    location.pointee.type = XR_TYPE_SPACE_LOCATION
-    location.pointee.next = nil
-    
-    location.pointee.pose.orientation.x = 0.0
-    location.pointee.pose.orientation.y = 0.0
-    location.pointee.pose.orientation.z = 0.0
-    location.pointee.pose.orientation.w = 1.0
-    location.pointee.pose.position.x = 0.0
-    location.pointee.pose.position.y = 0.0
-    location.pointee.pose.position.z = 0.0
-    
-    location.pointee.locationFlags = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT
+    path.pointee = 1234 // TODO
     return XR_SUCCESS
 }
 
@@ -1674,29 +1691,104 @@ public func xrPathToString(_ instance: XrInstance,
     return XR_SUCCESS
 }
 
-@_cdecl("xrPollEvent")
-public func xrPollEvent(_ instance: XrInstance,
-                        _ eventDataBuffer: UnsafeMutablePointer<XrEventDataBuffer>?) -> XrResult {
-    
-//    print("xrPollEvent")
-    guard let inst = unsafeBitCast(instance, to: Instance?.self) else {
-        return XR_ERROR_RUNTIME_FAILURE
+// MARK: spaces
+@_cdecl("xrCreateReferenceSpace")
+public func xrCreateReferenceSpace(_ session: XrSession,
+                                   _ createInfo: UnsafePointer<XrReferenceSpaceCreateInfo>?,
+                                   _ space: UnsafeMutablePointer<XrSpace>?) -> XrResult {
+    print("xrCreateReferenceSpace")
+    guard let spaceOut = space else {
+        return XR_ERROR_FUNCTION_UNSUPPORTED
     }
-    
-    if let event = inst.eventQueue.getEvent() {
-        print("xrPollEvent returning event")
-        if var buffer = eventDataBuffer?.pointee {
-            event.fillEventDataBuffer(inst, &buffer)
-            eventDataBuffer?.pointee = buffer
-        }
-        return XR_SUCCESS
-    }
-    
-    eventDataBuffer?.pointee.type = XrStructureType(0)
-    return XR_EVENT_UNAVAILABLE
+    let dummySpacePtr = UnsafeMutableRawPointer.allocate(byteCount: MemoryLayout<Int>.size,
+                                                         alignment: MemoryLayout<Int>.alignment)
+    dummySpacePtr.initializeMemory(as: Int.self, to: 256) // dummy value for reference space
+    spaceOut.pointee = OpaquePointer(dummySpacePtr)
+    return XR_SUCCESS
 }
 
+@_cdecl("xrDestroySpace")
+public func xrDestroySpace(_ space: XrSpace) -> XrResult {
+    print("xrDestroySpace")
+    let rawPtr = unsafeBitCast(space, to: UnsafeMutableRawPointer.self)
+    rawPtr.deallocate()
+    return XR_SUCCESS
+}
+
+
+@_cdecl("xrEnumerateReferenceSpaces")
+public func xrEnumerateReferenceSpaces(_ session: XrSession,
+                                       _ referenceSpaceTypeCapacityInput: UInt32,
+                                       _ referenceSpaceTypeCountOutput: UnsafeMutablePointer<UInt32>?,
+                                       _ referenceSpaceTypes: UnsafeMutablePointer<XrReferenceSpaceType>?) -> XrResult {
+    print("xrEnumerateReferenceSpaces")
+    let availableReferenceSpaces: [XrReferenceSpaceType] = [
+        XR_REFERENCE_SPACE_TYPE_STAGE,
+        XR_REFERENCE_SPACE_TYPE_LOCAL,
+        XR_REFERENCE_SPACE_TYPE_VIEW
+    ]
+    referenceSpaceTypeCountOutput?.pointee = UInt32(availableReferenceSpaces.count)
+    if referenceSpaceTypeCapacityInput < availableReferenceSpaces.count {
+        return XR_SUCCESS
+    }
+    if let referenceSpaceTypes = referenceSpaceTypes {
+        referenceSpaceTypes.update(from: availableReferenceSpaces, count: availableReferenceSpaces.count)
+    }
+    return XR_SUCCESS
+}
+
+@_cdecl("xrGetReferenceSpaceBoundsRect")
+public func xrGetReferenceSpaceBoundsRect(_ session: XrSession,
+                                          _ referenceSpaceType: XrReferenceSpaceType,
+                                          _ bounds: UnsafeMutablePointer<XrExtent2Df>?) -> XrResult {
+    if referenceSpaceType == XR_REFERENCE_SPACE_TYPE_STAGE {
+        if let bounds = bounds {
+            bounds.pointee.width = 2.0
+            bounds.pointee.height = 2.0
+        }
+    } else {
+        if let bounds = bounds {
+            bounds.pointee.width = 0.0
+            bounds.pointee.height = 0.0
+        }
+    }
+    return XR_SUCCESS
+}
+
+
+@_cdecl("xrLocateSpace")
+public func xrLocateSpace(_ space: XrSpace,
+                          _ baseSpace: XrSpace,
+                          _ time: XrTime,
+                          _ location: UnsafeMutablePointer<XrSpaceLocation>?) -> XrResult {
+    guard let location = location else {
+        return XR_ERROR_FUNCTION_UNSUPPORTED
+    }
+    location.pointee.type = XR_TYPE_SPACE_LOCATION
+    location.pointee.next = nil
+    
+    location.pointee.pose.orientation.x = 0.0
+    location.pointee.pose.orientation.y = 0.0
+    location.pointee.pose.orientation.z = 0.0
+    location.pointee.pose.orientation.w = 1.0
+    location.pointee.pose.position.x = 0.0
+    location.pointee.pose.position.y = 0.0
+    location.pointee.pose.position.z = 0.0
+    
+    location.pointee.locationFlags = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT
+    return XR_SUCCESS
+}
+
+
 // MARK: swapchains
+
+class Swapchain {
+    var textures: [MTLTexture]
+    
+    init(textures: [MTLTexture]) {
+        self.textures = textures
+    }
+}
 
 @_cdecl("xrEnumerateSwapchainFormats")
 public func xrEnumerateSwapchainFormats(_ session: XrSession,
@@ -1834,54 +1926,5 @@ public func xrWaitSwapchainImage(_ swapchain: XrSwapchain,
                                  _ waitInfo: UnsafePointer<XrSwapchainImageWaitInfo>?) -> XrResult {
 //    print("xrWaitSwapchainImage")
     
-    return XR_SUCCESS
-}
-
-@_cdecl("xrResultToString")
-public func xrResultToString(_ instance: XrInstance,
-                             _ result: XrResult,
-                             _ buffer: UnsafeMutablePointer<CChar>?) -> XrResult {
-    // TODO
-    let resultString: String
-    switch result {
-    case XR_SUCCESS:
-        resultString = "XR_SUCCESS"
-    case XR_ERROR_FUNCTION_UNSUPPORTED:
-        resultString = "XR_ERROR_FUNCTION_UNSUPPORTED"
-    default:
-        resultString = "XR_UNKNOWN_RESULT"
-    }
-    
-    let requiredSize = UInt32(resultString.utf8.count + 1)
-    
-    if XR_MAX_RESULT_STRING_SIZE >= requiredSize, let buffer = buffer {
-        resultString.withCString { src in
-            strncpy(buffer, src, Int(XR_MAX_RESULT_STRING_SIZE))
-        }
-    }
-    
-    return XR_SUCCESS
-}
-
-@_cdecl("xrStringToPath")
-public func xrStringToPath(_ instance: XrInstance,
-                           _ pathString: UnsafePointer<CChar>?,
-                           _ path: UnsafeMutablePointer<XrPath>?) -> XrResult {
-    guard let _ = pathString, let path = path else {
-        return XR_ERROR_FUNCTION_UNSUPPORTED
-    }
-    path.pointee = 1234 // TODO
-    return XR_SUCCESS
-}
-
-@_cdecl("xrSuggestInteractionProfileBindings")
-public func xrSuggestInteractionProfileBindings(_ instance: XrInstance,
-                                                _ suggestedBindings: UnsafePointer<XrInteractionProfileSuggestedBinding>?) -> XrResult {
-    print("xrSuggestInteractionProfileBindings called")
-    return XR_SUCCESS
-}
-
-@_cdecl("xrSyncActions")
-public func xrSyncActions(_ session: XrSession, _ syncInfo: UnsafePointer<XrActionsSyncInfo>?) -> XrResult {
     return XR_SUCCESS
 }
