@@ -6,7 +6,7 @@ import SwiftUI
 import CompositorServices
 import OpenXRRuntime.runtime
 import GameController
-
+internal import OrderedCollections
 
 // MARK: - OpenXR Function Pointer Type Aliases
 
@@ -376,6 +376,8 @@ class Session {
     var commandQueue : MTLCommandQueue
     var renderer: Renderer
     var eventQueue: EventQueue
+    var swapchain: [Swapchain]
+    var actionSets : OrderedDictionary<Int, ActionSet>
     
     init(
         metalDevice: MTLDevice,
@@ -393,12 +395,22 @@ class Session {
             self.renderer = renderer
             self.eventQueue = eventQueue
             self.handTrackingProvider = handtrackingProvider
+            self.actionSets = [:]
+            self.handTrackers = [:]
         }
     
-    var swapchain: [Swapchain]
     var timing: LayerRenderer.Frame.Timing?
     var currentFrame: LayerRenderer.Frame?
     var lastGoodDeviceAnchor : DeviceAnchor?
+    var handTrackers : [XrHandEXT:HandTracker]
+    
+    func print_() {
+        print("Session")
+        print("ActionSets")
+        for (priority, set) in self.actionSets {
+            print("   prio \(priority): \(set)")
+        }
+    }
 }
 
 // MARK: rendering
@@ -536,7 +548,6 @@ enum Event {
     func fillEventDataBuffer(_ instance: Instance,  _ buffer: inout XrEventDataBuffer) {
         switch self {
         case .sessionStateChanged(let state):
-            // TODO this should get info from the event, not the instance
             buffer.type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED
             
             print("new state: \(state)")
@@ -958,10 +969,10 @@ func rads(_ degrees: Float) -> Float {
 public func xrBeginSession(_ xrsession: XrSession,
                            _ beginInfo: UnsafePointer<XrSessionBeginInfo>?) -> XrResult {
     print("xrBeginSession")
-    
-//    guard let session = unsafeBitCast(xrsession, to: Session?.self) else {
-//        return XR_ERROR_RUNTIME_FAILURE
-//    }
+    let session = xrsession.getSession()!
+    session.eventQueue.newEvent(Event.sessionStateChanged(state:XR_SESSION_STATE_SYNCHRONIZED))
+    session.eventQueue.newEvent(Event.sessionStateChanged(state:XR_SESSION_STATE_VISIBLE))
+    session.eventQueue.newEvent(Event.sessionStateChanged(state:XR_SESSION_STATE_FOCUSED))
     return XR_SUCCESS
 }
 
@@ -1170,14 +1181,15 @@ public func xrEnumerateEnvironmentBlendModes(_ instance: XrInstance,
                                              _ environmentBlendModeCapacityInput: UInt32,
                                              _ environmentBlendModeCountOutput: UnsafeMutablePointer<UInt32>?,
                                              _ environmentBlendModes: UnsafeMutablePointer<XrEnvironmentBlendMode>?) -> XrResult {
-    environmentBlendModeCountOutput?.pointee = 1
+    environmentBlendModeCountOutput?.pointee = 2
     
-    if environmentBlendModeCapacityInput < 1 {
+    if environmentBlendModeCapacityInput < 2 {
         return XR_SUCCESS
     }
     
     if let environmentBlendModes = environmentBlendModes {
-        environmentBlendModes.pointee = XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND
+        environmentBlendModes[0] = XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND
+        environmentBlendModes[1] = XR_ENVIRONMENT_BLEND_MODE_OPAQUE
     }
     return XR_SUCCESS
 }
@@ -1209,26 +1221,30 @@ class HandTracker {
     var chirality : XrHandEXT
     var provider : HandTrackingProvider
     
+    var grasp : Float
+    
     init(chirality: XrHandEXT, provider : HandTrackingProvider) {
         self.chirality = chirality
         self.provider = provider
+        self.grasp = 1.0
     }
 }
 
 @_cdecl("xrCreateHandTrackerEXT")
-public func xrCreateHandTrackerEXT(_ session: XrSession,
-                                     _ createInfo: UnsafePointer<XrHandTrackerCreateInfoEXT>?,
+public func xrCreateHandTrackerEXT(_ xrSession: XrSession,
+                                   _ createInfo: UnsafePointer<XrHandTrackerCreateInfoEXT>?,
                                    _ handTracker: UnsafeMutablePointer<XrHandTrackerEXT>?) -> XrResult {
     print("xrCreateHandTrackerEXT")
-    guard let session = unsafeBitCast(session, to: Session?.self) else {
-        return XR_ERROR_RUNTIME_FAILURE
-    }
+    let session = xrSession.getSession()!
+    
 //    print("XrHandTrackerCreateInfoEXT:")
 //    print("  type: \(createInfo!.pointee.type)")
 //    print("  next: \(String(describing: createInfo!.pointee.next))")
 //    print("  hand: \(createInfo!.pointee.hand)")
+
     let ht = HandTracker(chirality: createInfo!.pointee.hand,
                          provider: session.handTrackingProvider)
+    session.handTrackers[createInfo!.pointee.hand] = ht
     
     handTracker!.pointee = OpaquePointer(Unmanaged.passRetained(ht).toOpaque())
     return XR_SUCCESS
@@ -1241,6 +1257,10 @@ extension simd_float4x4 {
     
     var orientation: simd_quatf {
         return simd_quaternion(self)
+    }
+    
+    func distance(to other: simd_float4x4) -> Float {
+        return simd_distance(self.translation, other.translation)
     }
 }
 
@@ -1329,6 +1349,11 @@ public func xrLocateHandJointsEXT(_ handTracker: XrHandTrackerEXT,
     ]
     
     if let handAnchor = handAnchor, let handSkeleton = handAnchor.handSkeleton {
+        let grasp = handSkeleton.joint(.middleFingerTip).anchorFromJointTransform.distance(
+            to: handSkeleton.joint(.wrist).anchorFromJointTransform)
+        ht.grasp = 1.2-abs(grasp * 5)
+//        print("grasp \(ht.chirality): \(ht.grasp)")
+        
         for (openxrIndex, joint) in jointMapping.enumerated() {
             var transform : simd_float4x4? = handSkeleton.joint(joint).anchorFromJointTransform
             if transform != nil {
@@ -1371,6 +1396,7 @@ public func xrLocateHandJointsEXT(_ handTracker: XrHandTrackerEXT,
 
 @_cdecl("xrDestroyHandTrackerEXT")
 public func xrDestroyHandTrackerEXT(_ handTracker: XrHandTrackerEXT) -> XrResult {
+    // TODO
     return XR_SUCCESS
 }
 
@@ -1472,7 +1498,10 @@ public func xrGetSystemProperties(_ instance: XrInstance,
             let handTrackingProps = extPointer.assumingMemoryBound(to: XrSystemHandTrackingPropertiesEXT.self)
             handTrackingProps.pointee.supportsHandTracking = XrBool32(XR_TRUE)
             print("  -> XrSystemHandTrackingPropertiesEXT found, supportsHandTracking set to \(handTrackingProps.pointee.supportsHandTracking)")
+        } else {
+            print("unknown property \(baseStruct.pointee.type)")
         }
+        
         if let next = baseStruct.pointee.next {
             currentExtension = UnsafeMutableRawPointer(mutating: next)
         } else {
@@ -1512,6 +1541,82 @@ public func xrResultToString(_ instance: XrInstance,
 
 // MARK: controllers
 
+extension XrActionSetCreateInfo {
+    func print_() {
+        let actionSetNameStr = withUnsafeBytes(of: actionSetName) { rawBuffer -> String in
+            let baseAddress = rawBuffer.baseAddress!.assumingMemoryBound(to: CChar.self)
+            return String(cString: baseAddress)
+        }
+        
+        let localizedActionSetNameStr = withUnsafeBytes(of: localizedActionSetName) { rawBuffer -> String in
+            let baseAddress = rawBuffer.baseAddress!.assumingMemoryBound(to: CChar.self)
+            return String(cString: baseAddress)
+        }
+
+        print("XrActionSetCreateInfo:")
+        print("  actionSetName: \(actionSetNameStr)")
+        print("  localizedActionSetName: \(localizedActionSetNameStr)")
+        print("  priority: \(priority)")
+    }
+}
+
+class ActionSet {
+    var name : String
+    var priority : Int
+    var actions: [String: Action] = [:]
+    init(name : String, priority : Int) {
+        self.name = name
+        self.priority = priority
+    }
+    func print_() {
+        print("ActionSet:")
+        print("  Name: \(name)")
+        print("  Priority: \(priority)")
+        if actions.isEmpty {
+            print("  No actions")
+        } else {
+            print("  Actions:")
+            for (key, action) in actions {
+                print("    Key: \(key)")
+                action.print_()
+            }
+        }
+    }
+}
+
+class ActionValue {
+    var value : Float
+    init(value : Float) {
+        self.value = value
+    }
+}
+
+class Action {
+    var name : String
+    var subpaths : [String:ActionValue]
+
+    init(name : String, subpaths : [String]) {
+        self.name = name
+        self.subpaths = [:]
+        for path in subpaths {
+            self.subpaths[path] = ActionValue(value: 0.0)
+        }
+    }
+
+    func print_() {
+        print("    Action:")
+        print("      Name: \(name)")
+        if subpaths.isEmpty {
+            print("      No subpaths")
+        } else {
+            print("      Subpaths:")
+            for subpath in subpaths {
+                print("        \(subpath)")
+            }
+        }
+    }
+}
+
 @_cdecl("xrCreateActionSet")
 public func xrCreateActionSet(_ instance: XrInstance,
                               _ createInfo: UnsafePointer<XrActionSetCreateInfo>?,
@@ -1520,68 +1625,169 @@ public func xrCreateActionSet(_ instance: XrInstance,
     guard let actionSetOut = actionSet else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
-    let dummyActionSetPtr = UnsafeMutableRawPointer.allocate(byteCount: MemoryLayout<Int>.size,
-                                                             alignment: MemoryLayout<Int>.alignment)
-    dummyActionSetPtr.initializeMemory(as: Int.self, to: 84) // dummy value for action set
-    actionSetOut.pointee = OpaquePointer(dummyActionSetPtr)
+    print("\(createInfo!.pointee.print_())")
+    let actionSetNameStr = withUnsafeBytes(of: createInfo!.pointee.actionSetName) { rawBuffer -> String in
+        let baseAddress = rawBuffer.baseAddress!.assumingMemoryBound(to: CChar.self)
+        return String(cString: baseAddress)
+    }
+    let actionSet = ActionSet(name: actionSetNameStr, priority: Int(createInfo!.pointee.priority))
+    actionSetOut.pointee = OpaquePointer(Unmanaged.passRetained(actionSet).toOpaque())
     return XR_SUCCESS
 }
 
 @_cdecl("xrDestroyActionSet")
 public func xrDestroyActionSet(_ actionSet: XrActionSet) -> XrResult {
     print("xrDestroyActionSet")
-    let rawPtr = unsafeBitCast(actionSet, to: UnsafeMutableRawPointer.self)
-    rawPtr.deallocate()
+//    let rawPtr = unsafeBitCast(actionSet, to: UnsafeMutableRawPointer.self)
+//    rawPtr.deallocate()
     return XR_SUCCESS
 }
 
+extension XrSession {
+    func getSession() -> Session? {
+        return unsafeBitCast(self, to: Session?.self)
+    }
+}
+
+extension Session {
+    func getXrSession() -> XrSession? {
+        return unsafeBitCast(self, to: XrSession?.self)
+    }
+}
+
+extension XrSessionActionSetsAttachInfo {
+    func print_() {
+        print("XrSessionActionSetsAttachInfo:")
+//        print("  countActionSets: \(countActionSets)")
+        if countActionSets > 0, let actionSets = actionSets {
+            print("  actionSets:")
+            for i in 0..<Int(countActionSets) {
+                print("    actionSet[\(i)]:")
+                let actionSet = unsafeBitCast(actionSets[i], to: ActionSet?.self)
+                actionSet!.print_()
+            }
+        } else {
+            print("  actionSets: nil or empty")
+        }
+    }
+}
+extension Session {
+
+}
 
 @_cdecl("xrAttachSessionActionSets")
-public func xrAttachSessionActionSets(_ session: XrSession,
+public func xrAttachSessionActionSets(_ xrsession: XrSession,
                                       _ attachInfo: UnsafePointer<XrSessionActionSetsAttachInfo>?) -> XrResult {
     print("xrAttachSessionActionSets")
+    
+    let session = xrsession.getSession()!
+    for i in 0..<Int(attachInfo!.pointee.countActionSets) {
+        let actionSet = unsafeBitCast(attachInfo!.pointee.actionSets[i], to: ActionSet.self)
+        session.actionSets[actionSet.priority] = actionSet
+    }
+    session.print_()
     return XR_SUCCESS
 }
 
-
+extension XrActionCreateInfo {
+    func print_() {
+        let actionNameStr = withUnsafeBytes(of: actionName) { rawBuffer -> String in
+            let baseAddress = rawBuffer.baseAddress!.assumingMemoryBound(to: CChar.self)
+            return String(cString: baseAddress)
+        }
+        
+        let localizedActionNameStr = withUnsafeBytes(of: localizedActionName) { rawBuffer -> String in
+            let baseAddress = rawBuffer.baseAddress!.assumingMemoryBound(to: CChar.self)
+            return String(cString: baseAddress)
+        }
+        
+        print("XrActionCreateInfo:")
+        print("  actionName: \(actionNameStr)")
+        print("  localizedActionName: \(localizedActionNameStr)")
+        print("  countSubactionPaths: \(countSubactionPaths)")
+        
+        if countSubactionPaths > 0, let subactionPaths = subactionPaths {
+            print("  subactionPaths:")
+            for i in 0..<Int(countSubactionPaths) {
+                let pathValue = subactionPaths[i]
+                let pathStr = xrPathToStringDictionary[pathValue] ?? "Unknown"
+                print("    [\(i)]: \(pathValue) (\(pathStr))")
+            }
+        } else {
+            print("  subactionPaths: nil or empty")
+        }
+    }
+}
 
 @_cdecl("xrCreateAction")
 public func xrCreateAction(_ actionSet: XrActionSet,
                            _ createInfo: UnsafePointer<XrActionCreateInfo>?,
-                           _ action: UnsafeMutablePointer<XrAction>?) -> XrResult {
+                           _ actionOut: UnsafeMutablePointer<XrAction>?) -> XrResult {
     print("xrCreateAction")
-    guard let actionOut = action else {
-        return XR_ERROR_FUNCTION_UNSUPPORTED
+    guard let createInfo = createInfo?.pointee else {
+        return XR_ERROR_RUNTIME_FAILURE
     }
-    let dummyActionPtr = UnsafeMutableRawPointer.allocate(byteCount: MemoryLayout<Int>.size,
-                                                          alignment: MemoryLayout<Int>.alignment)
-    dummyActionPtr.initializeMemory(as: Int.self, to: 42) // dummy value
-    actionOut.pointee = OpaquePointer(dummyActionPtr)
+//    createInfo.print_()
+    
+    guard let actionSet = unsafeBitCast(actionSet, to: ActionSet?.self) else {
+        return XR_ERROR_RUNTIME_FAILURE
+    }
+    
+    let actionNameStr = withUnsafeBytes(of: createInfo.actionName) { rawBuffer -> String in
+        let baseAddress = rawBuffer.baseAddress!.assumingMemoryBound(to: CChar.self)
+        return String(cString: baseAddress)
+    }
+    
+    var subpaths : [String] = []
+    for i in 0..<Int(createInfo.countSubactionPaths) {
+        let pathValue = createInfo.subactionPaths[i]
+        let pathStr = xrPathToStringDictionary[pathValue] ?? "Unknown" // TODO probably should error
+        subpaths.append(pathStr)
+    }
+    
+    let action = Action(name: actionNameStr, subpaths: subpaths)
+    
+    actionSet.actions[actionNameStr] = action // TODO check if name exists
+    
+    actionSet.print_()
+    
+    actionOut!.pointee = OpaquePointer(Unmanaged.passRetained(action).toOpaque())
     return XR_SUCCESS
 }
 
 @_cdecl("xrDestroyAction")
 public func xrDestroyAction(_ action: XrAction) -> XrResult {
     print("xrDestroyAction")
-    let rawPtr = unsafeBitCast(action, to: UnsafeMutableRawPointer.self)
-    rawPtr.deallocate()
+    // TODO
     return XR_SUCCESS
 }
 
-
-@_cdecl("xrCreateActionSpace")
-public func xrCreateActionSpace(_ session: XrSession,
-                                _ createInfo: UnsafePointer<XrActionSpaceCreateInfo>?,
-                                _ space: UnsafeMutablePointer<XrSpace>?) -> XrResult {
-    print("xrCreateActionSpace")
-    guard let spaceOut = space else {
-        return XR_ERROR_FUNCTION_UNSUPPORTED
+@_cdecl("xrSyncActions")
+public func xrSyncActions(_ xrSession: XrSession, _ syncInfo: UnsafePointer<XrActionsSyncInfo>?) -> XrResult {
+    print("xrSyncActions")
+    let session = xrSession.getSession()!
+//    syncInfo?.pointee.print_()
+    // TODO more than one active action set
+    let actionSet = syncInfo!.pointee.activeActionSets[0].actionSet.getActionSet()
+    
+    for (actionName, action) in actionSet!.actions {
+        if actionName == "pickup" {
+//            print("updating grasp \(action.subpaths)")
+            action.subpaths["/user/hand/left"]!.value = session.handTrackers[XR_HAND_LEFT_EXT]!.grasp
+            action.subpaths["/user/hand/right"]!.value = session.handTrackers[XR_HAND_RIGHT_EXT]!.grasp
+        } else {
+//            print("unknown action \(actionName)")
+        }
     }
-    let dummySpacePtr = UnsafeMutableRawPointer.allocate(byteCount: MemoryLayout<Int>.size,
-                                                         alignment: MemoryLayout<Int>.alignment)
-    dummySpacePtr.initializeMemory(as: Int.self, to: 128) // dummy value for action space
-    spaceOut.pointee = OpaquePointer(dummySpacePtr)
     return XR_SUCCESS
+}
+
+extension XrActionStateGetInfo {
+    func print_() {
+        print("XrActionStateGetInfo:")
+        let act = action.getAction()!
+        act.print_()
+    }
 }
 
 @_cdecl("xrGetActionStateBoolean")
@@ -1591,10 +1797,8 @@ public func xrGetActionStateBoolean(_ session: XrSession,
     guard let state = state else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
-    state.pointee.type = XR_TYPE_ACTION_STATE_BOOLEAN
-    state.pointee.next = nil
-    state.pointee.currentState = 0  // false
-    state.pointee.changedSinceLastSync = 0
+    print("xrGetActionStateBoolean")
+    getInfo?.pointee.print_()
     return XR_SUCCESS
 }
 
@@ -1602,13 +1806,30 @@ public func xrGetActionStateBoolean(_ session: XrSession,
 public func xrGetActionStateFloat(_ session: XrSession,
                                   _ getInfo: UnsafePointer<XrActionStateGetInfo>?,
                                   _ state: UnsafeMutablePointer<XrActionStateFloat>?) -> XrResult {
-    guard let state = state else {
-        return XR_ERROR_FUNCTION_UNSUPPORTED
-    }
-    state.pointee.type = XR_TYPE_ACTION_STATE_FLOAT
-    state.pointee.next = nil
-    state.pointee.currentState = 0.0
-    state.pointee.changedSinceLastSync = 0 // false
+    //    guard let state = state else {
+    //        return XR_ERROR_FUNCTION_UNSUPPORTED
+    //    }
+//    print("xrGetActionStateFloat")
+//    getInfo?.pointee.print_()
+    // in:
+    //    XrAction                    action;
+    //    XrPath                      subactionPath;
+    let action = getInfo!.pointee.action.getAction()
+    let subpath = getInfo!.pointee.subactionPath
+    state!.pointee.currentState = action!.subpaths[xrPathToStringDictionary[subpath]!]!.value
+    state!.pointee.changedSinceLastSync = 1
+    state!.pointee.isActive = 1
+    state!.pointee.lastChangeTime // TODO
+    
+    print("xrGetActionStateFloat \(action!.name):\(xrPathToStringDictionary[subpath])=>\(state!.pointee.currentState)")
+    // out:
+    //    float                 currentState;
+    //    XrBool32              changedSinceLastSync;
+    //    XrTime                lastChangeTime;
+    //    XrBool32              isActive;
+    
+    
+    
     return XR_SUCCESS
 }
 
@@ -1619,30 +1840,37 @@ public func xrGetActionStateVector2f(_ session: XrSession,
     guard let state = state else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
-    state.pointee.type = XR_TYPE_ACTION_STATE_VECTOR2F
-    state.pointee.next = nil
-    state.pointee.currentState.x = 0.0
-    state.pointee.currentState.y = 0.0
-    state.pointee.changedSinceLastSync = 0
+    print("xrGetActionStateVector2f")
+    getInfo?.pointee.print_()
     return XR_SUCCESS
 }
-
-@_cdecl("xrGetCurrentInteractionProfile")
-public func xrGetCurrentInteractionProfile(_ session: XrSession,
-                                           _ topLevelUserPath: XrPath,
-                                           _ interactionProfile: UnsafeMutablePointer<XrInteractionProfileState>?) -> XrResult {
-    guard let interactionProfile = interactionProfile else {
-        return XR_ERROR_FUNCTION_UNSUPPORTED
+extension XrActionsSyncInfo {
+    func print_() {
+        print("XrActionsSyncInfo:")
+        if countActiveActionSets > 0, let activeActionSets = activeActionSets {
+            for i in 0..<Int(countActiveActionSets) {
+                let activeSet = activeActionSets[i]
+                print("  ActiveActionSet[\(i)]: \(activeSet)")
+                let subactionPath = activeSet.subactionPath
+                let subactionPathStr = xrPathToStringDictionary[subactionPath] ?? "Unknown"
+                print("    subactionPath: \(subactionPath) (\(subactionPathStr))")
+            }
+        } else {
+            print("  activeActionSets: nil or empty")
+        }
     }
-    interactionProfile.pointee.type = XR_TYPE_INTERACTION_PROFILE_STATE
-    interactionProfile.pointee.next = nil
-    interactionProfile.pointee.interactionProfile = 0
-    return XR_SUCCESS
 }
 
-@_cdecl("xrSyncActions")
-public func xrSyncActions(_ session: XrSession, _ syncInfo: UnsafePointer<XrActionsSyncInfo>?) -> XrResult {
-    return XR_SUCCESS
+extension XrActionSet {
+    func getActionSet() -> ActionSet? {
+        return unsafeBitCast(self, to: ActionSet?.self)
+    }
+}
+
+extension XrAction {
+    func getAction() -> Action? {
+        return unsafeBitCast(self, to: Action?.self)
+    }
 }
 
 @_cdecl("xrApplyHapticFeedback")
@@ -1652,21 +1880,104 @@ public func xrApplyHapticFeedback(_ session: XrSession,
     return XR_SUCCESS
 }
 
+extension XrInteractionProfileState {
+    func print_() {
+        print("XrInteractionProfileState:")
+        if let profileString = xrPathToStringDictionary[interactionProfile] {
+            print("  interactionProfile: \(interactionProfile) (\(profileString))")
+        } else {
+            print("  interactionProfile: \(interactionProfile)")
+        }
+    }
+}
+
+@_cdecl("xrGetCurrentInteractionProfile")
+public func xrGetCurrentInteractionProfile(_ session: XrSession,
+                                           _ topLevelUserPath: XrPath,
+                                           _ interactionProfile: UnsafeMutablePointer<XrInteractionProfileState>?) -> XrResult {
+    // Check that the output pointer is valid.
+    guard let interactionProfile = interactionProfile else {
+        print("xrGetCurrentInteractionProfile: interactionProfile pointer is nil")
+        return XR_ERROR_FUNCTION_UNSUPPORTED
+    }
+    
+    let defaultProfile: XrPath = xrStringToPathDictionary["/interaction_profiles/ext/hand_interaction_ext"]!
+    
+    // Fill in the interaction profile state.
+    interactionProfile.pointee.type = XR_TYPE_INTERACTION_PROFILE_STATE
+    interactionProfile.pointee.next = nil
+    interactionProfile.pointee.interactionProfile = defaultProfile
+    
+    print("xrGetCurrentInteractionProfile: For topLevelUserPath \(xrPathToStringDictionary[topLevelUserPath]), returning interactionProfile \(defaultProfile)")
+    
+    return XR_SUCCESS
+}
+extension XrInteractionProfileSuggestedBinding {
+    func print_() {
+        print("XrInteractionProfileSuggestedBinding:")
+        
+        if let profileString = xrPathToStringDictionary[interactionProfile] {
+            print("  interactionProfile: \(interactionProfile) (\(profileString))")
+        } else {
+            print("  interactionProfile: \(interactionProfile)")
+        }
+        
+        if countSuggestedBindings > 0, let suggestedBindings = suggestedBindings {
+            for i in 0..<Int(countSuggestedBindings) {
+                let bindingEntry = suggestedBindings[i]
+                print("  suggestedBindings[\(i)]:")
+                
+                let actionInstance : Action = unsafeBitCast(bindingEntry.action, to: Action.self)
+                actionInstance.print_()
+                
+                let bindingPath = bindingEntry.binding
+                let bindingPathStr = xrPathToStringDictionary[bindingPath] ?? "Unknown"
+                print("    binding: \(bindingPath) (\(bindingPathStr))")
+            }
+        } else {
+            print("  suggestedBindings: nil or empty")
+        }
+    }
+}
+
 @_cdecl("xrSuggestInteractionProfileBindings")
 public func xrSuggestInteractionProfileBindings(_ instance: XrInstance,
                                                 _ suggestedBindings: UnsafePointer<XrInteractionProfileSuggestedBinding>?) -> XrResult {
     print("xrSuggestInteractionProfileBindings called")
+    suggestedBindings?.pointee.print_()
+    // TODO we should store some of this?
     return XR_SUCCESS
 }
+
+
+// probs should be inside Instance but this was ezier
+var xrStringToPathDictionary: [String: XrPath] = [:]
+var xrPathToStringDictionary: [XrPath: String] = [:]
+var xrCurrentPathValue: XrPath = UInt64(XR_NULL_PATH+1)
 
 @_cdecl("xrStringToPath")
 public func xrStringToPath(_ instance: XrInstance,
                            _ pathString: UnsafePointer<CChar>?,
                            _ path: UnsafeMutablePointer<XrPath>?) -> XrResult {
-    guard let _ = pathString, let path = path else {
+    guard let pathString = pathString, let pathOut = path else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
-    path.pointee = 1234 // TODO
+    
+    let str = String(cString: pathString)
+    
+    if let existingPath = xrStringToPathDictionary[str] {
+        pathOut.pointee = existingPath
+        return XR_SUCCESS
+    }
+    
+    let newPath = xrCurrentPathValue
+    xrCurrentPathValue += 1
+    
+    xrStringToPathDictionary[str] = newPath
+    xrPathToStringDictionary[newPath] = str
+    print("[xrStringToPath] Created new mapping: \"\(str)\" -> \(newPath)")
+    
+    pathOut.pointee = newPath
     return XR_SUCCESS
 }
 
@@ -1676,22 +1987,45 @@ public func xrPathToString(_ instance: XrInstance,
                            _ bufferCapacityInput: UInt32,
                            _ bufferCountOutput: UnsafeMutablePointer<UInt32>?,
                            _ buffer: UnsafeMutablePointer<CChar>?) -> XrResult {
-    // TODO
-    let dummyPathString = "dummy_path"
-    let requiredSize = UInt32(dummyPathString.utf8.count + 1)
+    guard let str = xrPathToStringDictionary[path] else {
+        return XR_ERROR_FUNCTION_UNSUPPORTED
+    }
     
-    bufferCountOutput?.pointee = requiredSize
+    let requiredLength = UInt32(str.utf8.count + 1)
+    bufferCountOutput?.pointee = requiredLength
+    if bufferCapacityInput < requiredLength {
+        print("[xrPathToString] Warning: Provided buffer capacity (\(bufferCapacityInput)) is less than required (\(requiredLength)).")
+        return XR_ERROR_SIZE_INSUFFICIENT
+    }
     
-    if bufferCapacityInput >= requiredSize, let buffer = buffer {
-        dummyPathString.withCString { src in
-            strncpy(buffer, src, Int(bufferCapacityInput))
+    if let buffer = buffer {
+        str.withCString { cStr in
+            strncpy(buffer, cStr, Int(bufferCapacityInput))
         }
     }
     
     return XR_SUCCESS
 }
 
+@_cdecl("xrCreateActionSpace")
+public func xrCreateActionSpace(_ session: XrSession,
+                                _ createInfo: UnsafePointer<XrActionSpaceCreateInfo>?,
+                                _ space: UnsafeMutablePointer<XrSpace>?) -> XrResult {
+    print("xrCreateActionSpace")
+    guard let spaceOut = space else {
+        return XR_ERROR_FUNCTION_UNSUPPORTED
+    }
+//    let dummySpacePtr = UnsafeMutableRawPointer.allocate(byteCount: MemoryLayout<Int>.size,
+//                                                         alignment: MemoryLayout<Int>.alignment)
+//    dummySpacePtr.initializeMemory(as: Int.self, to: 128) // dummy value for action space
+//    spaceOut.pointee = OpaquePointer(dummySpacePtr)
+    return XR_SUCCESS
+}
+
+
 // MARK: spaces
+
+
 @_cdecl("xrCreateReferenceSpace")
 public func xrCreateReferenceSpace(_ session: XrSession,
                                    _ createInfo: UnsafePointer<XrReferenceSpaceCreateInfo>?,
@@ -1700,18 +2034,18 @@ public func xrCreateReferenceSpace(_ session: XrSession,
     guard let spaceOut = space else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
-    let dummySpacePtr = UnsafeMutableRawPointer.allocate(byteCount: MemoryLayout<Int>.size,
-                                                         alignment: MemoryLayout<Int>.alignment)
-    dummySpacePtr.initializeMemory(as: Int.self, to: 256) // dummy value for reference space
-    spaceOut.pointee = OpaquePointer(dummySpacePtr)
+//    let dummySpacePtr = UnsafeMutableRawPointer.allocate(byteCount: MemoryLayout<Int>.size,
+//                                                         alignment: MemoryLayout<Int>.alignment)
+//    dummySpacePtr.initializeMemory(as: Int.self, to: 256) // dummy value for reference space
+//    spaceOut.pointee = OpaquePointer(dummySpacePtr)
     return XR_SUCCESS
 }
 
 @_cdecl("xrDestroySpace")
 public func xrDestroySpace(_ space: XrSpace) -> XrResult {
     print("xrDestroySpace")
-    let rawPtr = unsafeBitCast(space, to: UnsafeMutableRawPointer.self)
-    rawPtr.deallocate()
+//    let rawPtr = unsafeBitCast(space, to: UnsafeMutableRawPointer.self)
+//    rawPtr.deallocate()
     return XR_SUCCESS
 }
 
