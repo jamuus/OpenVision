@@ -413,6 +413,18 @@ class Session {
     }
 }
 
+extension XrSession {
+    func getSession() -> Session? {
+        return unsafeBitCast(self, to: Session?.self)
+    }
+}
+
+extension Session {
+    func getXrSession() -> XrSession? {
+        return unsafeBitCast(self, to: XrSession?.self)
+    }
+}
+
 // MARK: rendering
 
 extension Instance {
@@ -444,10 +456,22 @@ public func xrCreateInstance(_ createInfo: UnsafePointer<XrInstanceCreateInfo>?,
     }
     
     let instance = Instance()
+//    instanceOut.pointee = instance.getXrInstance()!
     instanceOut.pointee = OpaquePointer(Unmanaged.passRetained(instance).toOpaque())
     return XR_SUCCESS
 }
 
+extension XrInstance {
+    func getInstance() -> Instance? {
+        return unsafeBitCast(self, to: Instance?.self)
+    }
+}
+
+extension Instance {
+    func getXrInstance() -> XrInstance? {
+        return unsafeBitCast(self, to: XrInstance?.self)
+    }
+}
 
 @_cdecl("xrDestroyInstance")
 public func xrDestroyInstance(_ instance: XrInstance) -> XrResult {
@@ -502,9 +526,7 @@ public func xrCreateSession(_ instance: XrInstance,
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     
-    guard let inst = unsafeBitCast(instance, to: Instance?.self) else {
-        return XR_ERROR_RUNTIME_FAILURE
-    }
+    let inst = instance.getInstance()!
     
     let session = inst.createSession()
     guard let session = session else {
@@ -568,9 +590,7 @@ public func xrPollEvent(_ instance: XrInstance,
                         _ eventDataBuffer: UnsafeMutablePointer<XrEventDataBuffer>?) -> XrResult {
     
 //    print("xrPollEvent")
-    guard let inst = unsafeBitCast(instance, to: Instance?.self) else {
-        return XR_ERROR_RUNTIME_FAILURE
-    }
+    let inst = instance.getInstance()!
     
     if let event = inst.eventQueue.getEvent() {
         print("xrPollEvent returning event")
@@ -611,9 +631,7 @@ public func xrWaitFrame(_ session: XrSession,
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
 //    print("xrWaitFrame")
-    guard let sess = unsafeBitCast(session, to: Session?.self) else {
-        return XR_ERROR_RUNTIME_FAILURE
-    }
+    let sess = session.getSession()!
 //    print("\tpaused: \(globalLayerRenderer!.state == .paused), running: \(globalLayerRenderer!.state == .running), invalidated: \(globalLayerRenderer!.state == .invalidated)")
     
     var frame : LayerRenderer.Frame?
@@ -692,9 +710,7 @@ public func xrLocateViews(_ session: XrSession,
                           _ viewCountOutput: UnsafeMutablePointer<UInt32>?,
                           _ views: UnsafeMutablePointer<XrView>?) -> XrResult {
 //    print("xrLocateViews")
-    guard let sess = unsafeBitCast(session, to: Session?.self) else {
-        return XR_ERROR_RUNTIME_FAILURE
-    }
+    let sess = session.getSession()!
 
     // TODO returns nil if minimised
     let drawable = sess.currentFrame!.queryDrawable()!
@@ -763,9 +779,7 @@ public func xrLocateViews(_ session: XrSession,
 public func xrBeginFrame(_ session: XrSession,
                          _ frameBeginInfo: UnsafePointer<XrFrameBeginInfo>?) -> XrResult {
 //    print("xrBeginFrame")
-    guard let sess = unsafeBitCast(session, to: Session?.self) else {
-        return XR_ERROR_RUNTIME_FAILURE
-    }
+    let sess = session.getSession()!
     
     if let currentFrame = sess.currentFrame {
         currentFrame.startSubmission()
@@ -985,9 +999,7 @@ public func xrEndSession(_ session: XrSession) -> XrResult {
 public func xrEndFrame(_ session: XrSession,
                        _ frameEndInfo: UnsafePointer<XrFrameEndInfo>?) -> XrResult {
 //    print("xrEndFrame")
-    guard let sess = unsafeBitCast(session, to: Session?.self) else {
-        return XR_ERROR_RUNTIME_FAILURE
-    }
+    let sess = session.getSession()!
     
     guard let info = frameEndInfo?.pointee else {
         print("No frame end info provided")
@@ -1202,10 +1214,7 @@ public func xrGetMetalGraphicsRequirementsKHR(_ instance: XrInstance,
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     
-    guard let inst = unsafeBitCast(instance, to: Instance?.self) else {
-        return XR_ERROR_RUNTIME_FAILURE
-    }
-    
+    let inst = instance.getInstance()!
     
     metalRequirements.pointee.type = XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR
     metalRequirements.pointee.next = nil
@@ -1270,6 +1279,7 @@ public func xrLocateHandJointsEXT(_ handTracker: XrHandTrackerEXT,
                                   _ locations: UnsafeMutablePointer<XrHandJointLocationsEXT>?) -> XrResult {
 //    print("xrLocateHandJointsEXT called")
     
+    // TODO getter for handtracker
     guard let ht = unsafeBitCast(handTracker, to: HandTracker?.self) else {
         return XR_ERROR_RUNTIME_FAILURE
     }
@@ -1643,17 +1653,6 @@ public func xrDestroyActionSet(_ actionSet: XrActionSet) -> XrResult {
     return XR_SUCCESS
 }
 
-extension XrSession {
-    func getSession() -> Session? {
-        return unsafeBitCast(self, to: Session?.self)
-    }
-}
-
-extension Session {
-    func getXrSession() -> XrSession? {
-        return unsafeBitCast(self, to: XrSession?.self)
-    }
-}
 
 extension XrSessionActionSetsAttachInfo {
     func print_() {
@@ -1663,7 +1662,7 @@ extension XrSessionActionSetsAttachInfo {
             print("  actionSets:")
             for i in 0..<Int(countActionSets) {
                 print("    actionSet[\(i)]:")
-                let actionSet = unsafeBitCast(actionSets[i], to: ActionSet?.self)
+                let actionSet = actionSets[i]!.getActionSet()
                 actionSet!.print_()
             }
         } else {
@@ -1682,7 +1681,7 @@ public func xrAttachSessionActionSets(_ xrsession: XrSession,
     
     let session = xrsession.getSession()!
     for i in 0..<Int(attachInfo!.pointee.countActionSets) {
-        let actionSet = unsafeBitCast(attachInfo!.pointee.actionSets[i], to: ActionSet.self)
+        let actionSet = attachInfo!.pointee.actionSets[i]!.getActionSet()!
         session.actionSets[actionSet.priority] = actionSet
     }
     session.print_()
@@ -1729,9 +1728,7 @@ public func xrCreateAction(_ actionSet: XrActionSet,
     }
 //    createInfo.print_()
     
-    guard let actionSet = unsafeBitCast(actionSet, to: ActionSet?.self) else {
-        return XR_ERROR_RUNTIME_FAILURE
-    }
+    let actionSet = actionSet.getActionSet()!
     
     let actionNameStr = withUnsafeBytes(of: createInfo.actionName) { rawBuffer -> String in
         let baseAddress = rawBuffer.baseAddress!.assumingMemoryBound(to: CChar.self)
@@ -1927,7 +1924,7 @@ extension XrInteractionProfileSuggestedBinding {
                 let bindingEntry = suggestedBindings[i]
                 print("  suggestedBindings[\(i)]:")
                 
-                let actionInstance : Action = unsafeBitCast(bindingEntry.action, to: Action.self)
+                let actionInstance = bindingEntry.action.getAction()!
                 actionInstance.print_()
                 
                 let bindingPath = bindingEntry.binding
@@ -2145,17 +2142,14 @@ public func xrEnumerateSwapchainFormats(_ session: XrSession,
 }
 
 @_cdecl("xrCreateSwapchain")
-public func xrCreateSwapchain(_ session: XrSession,
+public func xrCreateSwapchain(_ xrSession: XrSession,
                               _ createInfo: UnsafePointer<XrSwapchainCreateInfo>?,
                               _ swapchain: UnsafeMutablePointer<XrSwapchain>?) -> XrResult {
     print("xrCreateSwapchain")
     guard let swapchainOut = swapchain, let ci = createInfo?.pointee else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
-    
-    guard let sess = unsafeBitCast(session, to: Session?.self) else {
-        return XR_ERROR_RUNTIME_FAILURE
-    }
+    let session = xrSession.getSession()!
     
     let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: MTLPixelFormat(rawValue: UInt(ci.format))!,
                                                               width: Int(ci.width),
@@ -2180,12 +2174,12 @@ public func xrCreateSwapchain(_ session: XrSession,
     
     // one swapchain texture for now
     var textures: [MTLTexture] = []
-    if let texture = sess.metalDevice.makeTexture(descriptor: descriptor) {
+    if let texture = session.metalDevice.makeTexture(descriptor: descriptor) {
         textures.append(texture)
     }
     
     let swapchain = Swapchain(textures: textures)
-    sess.swapchain.append(swapchain)
+    session.swapchain.append(swapchain)
     
     swapchainOut.pointee = OpaquePointer(Unmanaged.passRetained(swapchain).toOpaque())
     return XR_SUCCESS
