@@ -619,6 +619,13 @@ func printDeviceAnchorState(_ anchor: DeviceAnchor) {
     print("  Orientation: \(orientation)")
 }
 
+extension LayerRenderer.Clock.Instant.Duration {
+    var timeInterval: TimeInterval {
+        let nanoseconds = TimeInterval(components.attoseconds / 1_000_000_000)
+        return TimeInterval(components.seconds) + (nanoseconds / TimeInterval(NSEC_PER_SEC))
+    }
+}
+
 // called before game update
 @_cdecl("xrWaitFrame")
 public func xrWaitFrame(_ session: XrSession,
@@ -644,9 +651,13 @@ public func xrWaitFrame(_ session: XrSession,
     
     sess.timing = frame!.predictTiming()!
     let deadline = sess.timing!.presentationTime
-
-    let (seconds, attoseconds) = LayerRenderer.Clock.Instant.epoch.duration(to: deadline).components
-    let deadlineNanos: Int64 = Int64(seconds) * 1_000_000_000 + Int64(attoseconds / 1_000_000_000)
+    
+    let time = LayerRenderer.Clock.Instant.epoch.duration(to: deadline).timeInterval
+    let deadlineNanos = Int64(time * 1e9)
+    
+//    let (seconds, attoseconds) = LayerRenderer.Clock.Instant.epoch.duration(to: deadline).components
+//    let deadlineNanos: Int64 = Int64(seconds) * 1_000_000_000 + Int64(attoseconds / 1_000_000_000)
+    
 //    print("deadline \(Double(deadlineNanos)/1e9)")
     frameState.pointee.type = XR_TYPE_FRAME_STATE
     frameState.pointee.next = nil
@@ -1292,7 +1303,7 @@ public func xrLocateHandJointsEXT(_ handTracker: XrHandTrackerEXT,
 //    print("  baseSpace: \(info.baseSpace)")
 //    print("  time: \(info.time)")
     
-    let deadlineSeconds: Double = Double(info.time) / 1_000_000_000.0
+    let deadlineSeconds: Double = Double(info.time) / Double(NSEC_PER_SEC)
     
     let (leftAnchor, rightAnchor) = ht.provider.handAnchors(at: deadlineSeconds)
     var handAnchor: HandAnchor?
@@ -1592,9 +1603,33 @@ class ActionSet {
 }
 
 class ActionValue {
+}
+
+class FloatAction : ActionValue {
     var value : Float
     init(value : Float) {
         self.value = value
+    }
+    
+    func getFloat() -> Float {
+        return value
+    }
+    func setFloat(val : Float) {
+        self.value = val
+    }
+}
+
+class BoolAction : ActionValue {
+    var value : Bool
+    init(value : Bool) {
+        self.value = value
+    }
+    
+    func getFloat() -> Bool {
+        return value
+    }
+    func setFloat(val : Bool) {
+        self.value = val
     }
 }
 
@@ -1613,12 +1648,30 @@ class ActionValue {
 class Action : CustomStringConvertible {
     var name : String
     var subpaths : [String:ActionValue]
+    var bindpath : String?
 
+    init(name : String, subpaths : [String], val : Float) {
+        self.name = name
+        self.subpaths = [:]
+        for path in subpaths {
+            self.subpaths[path] = FloatAction(value: val)
+        }
+    }
+    
+    init(name : String, subpaths : [String], val : Bool) {
+        self.name = name
+        self.subpaths = [:]
+        for path in subpaths {
+            self.subpaths[path] = BoolAction(value: val)
+        }
+    }
+    
+    // pose action, no value i think
     init(name : String, subpaths : [String]) {
         self.name = name
         self.subpaths = [:]
         for path in subpaths {
-            self.subpaths[path] = ActionValue(value: 0.0)
+            self.subpaths[path] = ActionValue()
         }
     }
 
@@ -1633,6 +1686,7 @@ class Action : CustomStringConvertible {
                 output += "        \(subpath)\n"
             }
         }
+        output += "      Bind path: \(bindpath)"
         return output
     }
 }
@@ -1746,27 +1800,47 @@ public func xrCreateAction(_ actionSet: XrActionSet,
         return XR_ERROR_RUNTIME_FAILURE
     }
     createInfo.print_()
-    
+
     let actionSet = actionSet.getActionSet()!
-    
+
     let actionNameStr = withUnsafeBytes(of: createInfo.actionName) { rawBuffer -> String in
         let baseAddress = rawBuffer.baseAddress!.assumingMemoryBound(to: CChar.self)
         return String(cString: baseAddress)
     }
-    
+
     var subpaths : [String] = []
     for i in 0..<Int(createInfo.countSubactionPaths) {
         let pathValue = createInfo.subactionPaths[i]
-        let pathStr = xrPathToStringDictionary[pathValue] ?? "Unknown" // TODO probably should error
+        let pathStr = xrPathToStringDictionary[pathValue]!
         subpaths.append(pathStr)
     }
+    //    XR_ACTION_TYPE_BOOLEAN_INPUT = 1,
+    //    XR_ACTION_TYPE_FLOAT_INPUT = 2,
+    //    XR_ACTION_TYPE_VECTOR2F_INPUT = 3,
+    //    XR_ACTION_TYPE_POSE_INPUT = 4,
+    //    XR_ACTION_TYPE_VIBRATION_OUTPUT = 100,
     
-    let action = Action(name: actionNameStr, subpaths: subpaths)
+    var action : Action
+    switch (createInfo.actionType) {
+    case XR_ACTION_TYPE_FLOAT_INPUT:
+        action = Action(name: actionNameStr, subpaths: subpaths, val: 0.0)
+    case XR_ACTION_TYPE_BOOLEAN_INPUT:
+        action = Action(name: actionNameStr, subpaths: subpaths, val: false)
+    case XR_ACTION_TYPE_POSE_INPUT:
+        action = Action(name: actionNameStr, subpaths: subpaths)
+    case XR_ACTION_TYPE_VECTOR2F_INPUT:
+        fallthrough
+    case XR_ACTION_TYPE_VIBRATION_OUTPUT:
+        fallthrough
+    default:
+        print("unimplemented action type \(createInfo.actionType)")
+        return XR_ERROR_RUNTIME_FAILURE
+    }
     
     actionSet.actions[actionNameStr] = action // TODO check if name exists
-    
+
 //    actionSet.print_()
-    
+
     actionOut!.pointee = OpaquePointer(Unmanaged.passRetained(action).toOpaque())
     return XR_SUCCESS
 }
@@ -1778,21 +1852,27 @@ public func xrDestroyAction(_ action: XrAction) -> XrResult {
     return XR_SUCCESS
 }
 
+// copy current actual controller inputs into corresponding action's
 @_cdecl("xrSyncActions")
 public func xrSyncActions(_ xrSession: XrSession, _ syncInfo: UnsafePointer<XrActionsSyncInfo>?) -> XrResult {
-//    print("xrSyncActions")
     let session = xrSession.getSession()!
-//    syncInfo?.pointee.print_()
     
     // TODO more than one active action set
     let actionSet = syncInfo!.pointee.activeActionSets[0].actionSet.getActionSet()
     
     for (actionName, action) in actionSet!.actions {
-        if actionName == "pickup" {
-//            print("updating grasp \(action.subpaths)")
-            action.subpaths["/user/hand/left"]!.value = session.handTrackers[XR_HAND_LEFT_EXT]!.grasp
-            action.subpaths["/user/hand/right"]!.value = session.handTrackers[XR_HAND_RIGHT_EXT]!.grasp
-        } else {
+        switch actionName {
+        case "pickup":
+            if let leftValue = action.subpaths["/user/hand/left"] as? FloatAction {
+                leftValue.setFloat(val: session.handTrackers[XR_HAND_LEFT_EXT]!.grasp)
+            }
+            if let rightValue = action.subpaths["/user/hand/right"] as? FloatAction {
+                rightValue.setFloat(val: session.handTrackers[XR_HAND_RIGHT_EXT]!.grasp)
+            }
+        case "pose":
+            // nothing to do cause
+            break
+        default:
             print("xrSyncActions unknown action \(actionName)")
         }
     }
@@ -1823,29 +1903,18 @@ public func xrGetActionStateBoolean(_ session: XrSession,
 public func xrGetActionStateFloat(_ session: XrSession,
                                   _ getInfo: UnsafePointer<XrActionStateGetInfo>?,
                                   _ state: UnsafeMutablePointer<XrActionStateFloat>?) -> XrResult {
-    //    guard let state = state else {
-    //        return XR_ERROR_FUNCTION_UNSUPPORTED
-    //    }
-//    print("xrGetActionStateFloat")
-//    getInfo?.pointee.print_()
-    // in:
-    //    XrAction                    action;
-    //    XrPath                      subactionPath;
     let action = getInfo!.pointee.action.getAction()
     let subpath = getInfo!.pointee.subactionPath
-    state!.pointee.currentState = action!.subpaths[xrPathToStringDictionary[subpath]!]!.value
-    state!.pointee.changedSinceLastSync = 1
-    state!.pointee.isActive = 1
-    state!.pointee.lastChangeTime // TODO
     
-    print("xrGetActionStateFloat \(action!.name):\(xrPathToStringDictionary[subpath])=>\(state!.pointee.currentState)")
-    // out:
-    //    float                 currentState;
-    //    XrBool32              changedSinceLastSync;
-    //    XrTime                lastChangeTime;
-    //    XrBool32              isActive;
-    
-    
+    if let val = (action!.subpaths[xrPathToStringDictionary[subpath]!] as? FloatAction) {
+        state!.pointee.currentState = val.getFloat()
+        state!.pointee.changedSinceLastSync = 1
+        state!.pointee.isActive = 1
+    } else {
+        state!.pointee.isActive = 0
+    }
+
+//    state!.pointee.lastChangeTime // TODO
     
     return XR_SUCCESS
 }
@@ -1947,9 +2016,26 @@ extension XrInteractionProfileSuggestedBinding {
 
 @_cdecl("xrSuggestInteractionProfileBindings")
 public func xrSuggestInteractionProfileBindings(_ instance: XrInstance,
-                                                _ suggestedBindings: UnsafePointer<XrInteractionProfileSuggestedBinding>?) -> XrResult {
+                                                _ suggestedBindingsParam: UnsafePointer<XrInteractionProfileSuggestedBinding>?) -> XrResult {
     print("xrSuggestInteractionProfileBindings called")
-    suggestedBindings?.pointee.print_()
+    suggestedBindingsParam?.pointee.print_()
+    let profileString = xrPathToStringDictionary[suggestedBindingsParam!.pointee.interactionProfile]
+    
+    if profileString == "/interaction_profiles/ext/hand_interaction_ext" {
+        if suggestedBindingsParam!.pointee.countSuggestedBindings > 0, let suggestedBindings = suggestedBindingsParam!.pointee.suggestedBindings {
+            for i in 0..<Int(suggestedBindingsParam!.pointee.countSuggestedBindings) {
+                let bindingEntry = suggestedBindings[i]
+                
+                let actionInstance = bindingEntry.action.getAction()!
+                
+                let bindingPath = bindingEntry.binding
+                let bindingPathStr = xrPathToStringDictionary[bindingPath]!
+                actionInstance.bindpath = bindingPathStr
+            }
+        } else {
+            print("  suggestedBindings: nil or empty")
+        }
+    }
     // TODO we should store the info passed to be able to return proper profile
     return XR_SUCCESS
 }
@@ -2025,18 +2111,18 @@ extension XrActionSpaceCreateInfo: CustomStringConvertible {
 // MARK: spaces
 
 class Space: CustomStringConvertible {
-    func getPose() -> simd_float4x4? {
+    func getPose(at: TimeInterval) -> simd_float4x4? {
         fatalError("Subclasses must override getPose()")
     }
     
     public var description: String {
-        return "Space of type \(type(of: self)) with pose:\n\(getPose())"
+        return "Space of type \(type(of: self)) with pose:\n\(getPose(at: CACurrentMediaTime()))"
     }
     
     // TODO at time
-    func pose(relativeTo baseSpace: Space) -> simd_float4x4? {
-        guard let basePose = baseSpace.getPose() else { return nil }
-        guard let selfPose = self.getPose() else { return nil }
+    func getPose(relativeTo baseSpace: Space, at : TimeInterval) -> simd_float4x4? {
+        guard let basePose = baseSpace.getPose(at: at) else { return nil }
+        guard let selfPose = self.getPose(at: at) else { return nil }
         return simd_mul(simd_inverse(basePose), selfPose)
     }
 }
@@ -2054,13 +2140,25 @@ class FixedSpace: Space {
         self.pose = transform
     }
     
-    override func getPose() -> simd_float4x4 {
+    override func getPose(at: TimeInterval) -> simd_float4x4 {
         return self.pose
     }
     
     override var description: String {
         return "FixedSpace:\n  pose: \(pose)"
     }
+}
+import simd
+
+
+// TODO fix
+func gripSurfaceTransform(from handAnchor: HandAnchor) -> simd_float4x4? {
+    // Ensure the hand skeleton is available.
+    guard let handSkeleton = handAnchor.handSkeleton else {
+        return nil
+    }
+    
+    return matrix_identity_float4x4
 }
 
 // A space that calculates its pose based on an action reference.
@@ -2074,22 +2172,22 @@ class ActionSpace: Space {
         self.subactionPath = subactionPath
         self.session = session
     }
-    
-    override func getPose() -> simd_float4x4? {
+
+    override func getPose(at: TimeInterval) -> simd_float4x4? {
         switch (action.name, subactionPath) {
         case ("pose", "/user/hand/right"):
-            let handAnchor = session.handTrackingProvider.handAnchors(at: Date().timeIntervalSince1970)
-            return handAnchor.rightHand?.originFromAnchorTransform
+            let handAnchor = session.handTrackingProvider.handAnchors(at: at)
+            return handAnchor.rightHand!.originFromAnchorTransform * gripSurfaceTransform(from: handAnchor.rightHand!)!
         case ("pose", "/user/hand/left"):
-            let handAnchor = session.handTrackingProvider.handAnchors(at: Date().timeIntervalSince1970)
-            return handAnchor.leftHand?.originFromAnchorTransform
+            let handAnchor = session.handTrackingProvider.handAnchors(at: at)
+            return handAnchor.leftHand!.originFromAnchorTransform * gripSurfaceTransform(from: handAnchor.leftHand!)!
         default:
             fatalError("Unknown match for action: \(action.name) and subactionPath: \(subactionPath)")
         }
     }
     
     override var description: String {
-        return "ActionSpace:\n  action: \(action):\(subactionPath)\n  calculated pose: \(getPose())"
+        return "ActionSpace:\n  action: \(action):\(subactionPath)\n  calculated pose: \(getPose(at: CACurrentMediaTime()))"
     }
 }
 
@@ -2108,8 +2206,7 @@ public func xrCreateActionSpace(_ session: XrSession,
     
     let space = ActionSpace(action: createInfo!.pointee.action.getAction()!,
                             subactionPath: xrPathToStringDictionary[createInfo!.pointee.subactionPath]!,
-                            session: session.getSession()!
-    )
+                            session: session.getSession()!)
     xrSpace!.pointee = OpaquePointer(Unmanaged.passRetained(space).toOpaque())
     return XR_SUCCESS
 }
@@ -2139,6 +2236,7 @@ public func xrEnumerateReferenceSpaces(_ session: XrSession,
 public func xrGetReferenceSpaceBoundsRect(_ session: XrSession,
                                           _ referenceSpaceType: XrReferenceSpaceType,
                                           _ bounds: UnsafeMutablePointer<XrExtent2Df>?) -> XrResult {
+    // TODO check this makes any sense
     if referenceSpaceType == XR_REFERENCE_SPACE_TYPE_STAGE {
         if let bounds = bounds {
             bounds.pointee.width = 2.0
@@ -2183,12 +2281,12 @@ public func xrCreateReferenceSpace(_ session: XrSession,
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     // TODO
-    //    XR_REFERENCE_SPACE_TYPE_VIEW = 1,
+    //    XR_REFERENCE_SPACE_TYPE_VIEW  = 1,
     //    XR_REFERENCE_SPACE_TYPE_LOCAL = 2,
     //    XR_REFERENCE_SPACE_TYPE_STAGE = 3,
     
     let pose = createInfo!.pointee.poseInReferenceSpace
-    let space = FixedSpace(xrPose: pose) // maybe this isn't actually fixed but not sure yet
+    let space = FixedSpace(xrPose: pose) // maybe this shouldn't be fixed but not sure yet
     
     xrSpace.pointee = OpaquePointer(Unmanaged.passRetained(space).toOpaque())
     return XR_SUCCESS
@@ -2229,7 +2327,7 @@ extension XrSpaceLocation: CustomStringConvertible {
 @_cdecl("xrLocateSpace")
 public func xrLocateSpace(_ xrSpace: XrSpace,
                           _ baseSpace: XrSpace,
-                          _ time: XrTime,
+                          _ xrTime: XrTime,
                           _ location: UnsafeMutablePointer<XrSpaceLocation>?) -> XrResult {
     guard let location = location else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
@@ -2238,8 +2336,9 @@ public func xrLocateSpace(_ xrSpace: XrSpace,
     guard let space = xrSpace.getSpace(), let baseSpaceObj = baseSpace.getSpace() else {
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
-
-    guard let relativeTransform = space.pose(relativeTo: baseSpaceObj) else {
+    
+    let time = Double(xrTime) / Double(NSEC_PER_SEC)
+    guard let relativeTransform = space.getPose(relativeTo: baseSpaceObj, at: time) else {
         return XR_SUCCESS
     }
     let translation = relativeTransform.translation
