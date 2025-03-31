@@ -99,6 +99,7 @@ public func xrGetInstanceProcAddr(_ instance: XrInstance,
     case "xrAcquireSwapchainImage":
         function?.pointee = unsafeBitCast(xrAcquireSwapchainImage as PFN_xrAcquireSwapchainImage,
                                           to: UnsafeMutableRawPointer.self)
+        
     case "xrApplyHapticFeedback":
         function?.pointee = unsafeBitCast(xrApplyHapticFeedback as PFN_xrApplyHapticFeedback,
                                           to: UnsafeMutableRawPointer.self)
@@ -260,6 +261,7 @@ struct MetalLayerConfiguration: CompositorLayerConfiguration {
     }
 }
 
+//var controllers: [GCController] = GCController.controllers()
 public struct OpenXRScene: Scene {
     @State  var immersionStyle: ImmersionStyle = MixedImmersionStyle.mixed
     let onInit: ((LayerRenderer) -> Void)?
@@ -267,7 +269,6 @@ public struct OpenXRScene: Scene {
     @Binding var setImmersiveSpace: Bool
     @Binding var isLoading: Bool
     
-    @State private var controllers: [GCController] = GCController.controllers()
 
     public init(onInit: ((LayerRenderer) -> Void)?, onAppear: (() -> Void)?, setImmersiveSpace: Binding<Bool>, isLoading: Binding<Bool>) {
         self.onInit = onInit
@@ -282,18 +283,6 @@ public struct OpenXRScene: Scene {
                 .frame(minWidth: 480, maxWidth: 480, minHeight: 200, maxHeight: 320)
                 .onAppear {
                     onAppear?()
-                    controllers = GCController.controllers()
-
-                    // Register for notifications to update the list when controllers connect/disconnect
-                    NotificationCenter.default.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { _ in
-                        controllers = GCController.controllers()
-                        print("controller connected \(controllers)")
-                    }
-                    NotificationCenter.default.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { _ in
-                        controllers = GCController.controllers()
-                        print("controller disconnected \(controllers)")
-
-                    }
                 }
         }
         .windowResizability(.contentSize)
@@ -361,10 +350,37 @@ class Instance {
     var eventQueue: EventQueue
     var session: Session? // just one session for now
     let metalDevice: MTLDevice = MTLCreateSystemDefaultDevice()!
+    var controllers: [GCController]
     
-    init() {
+    init(controllers: [GCController]) {
+        self.controllers = controllers
         self.eventQueue = EventQueue()
     }
+    
+
+    func createSession() -> Session? {
+        if self.session != nil { // only support one session at the moment
+            return nil
+        }
+        
+        let session = Session(
+            instance: self,
+            metalDevice: self.metalDevice,
+            arSession: ARKitSession(),
+            worldTrackingProvider: WorldTrackingProvider(),
+            commandQueue: self.metalDevice.makeCommandQueue()!,
+            renderer: setupRenderer(device: self.metalDevice),
+            eventQueue: self.eventQueue,
+            handtrackingProvider: HandTrackingProvider()
+        )
+        session.commandQueue.label = "openxr command queue"
+        return session
+    }
+    
+    func getXrInstance() -> XrInstance? {
+        return unsafeBitCast(self, to: XrInstance?.self)
+    }
+
 }
 
 
@@ -378,8 +394,10 @@ class Session {
     var eventQueue: EventQueue
     var swapchain: [Swapchain]
     var actionSets : OrderedDictionary<Int, ActionSet>
+    weak var instance : Instance?
     
     init(
+        instance: Instance,
         metalDevice: MTLDevice,
         arSession: ARKitSession,
         worldTrackingProvider: WorldTrackingProvider,
@@ -387,6 +405,7 @@ class Session {
         renderer: Renderer,
         eventQueue: EventQueue,
         handtrackingProvider: HandTrackingProvider ) {
+            self.instance = instance
             self.metalDevice = metalDevice
             self.arSession = arSession
             self.worldTrackingProvider = worldTrackingProvider
@@ -427,35 +446,44 @@ extension Session {
 
 // MARK: rendering
 
-extension Instance {
-    func createSession() -> Session? {
-        if self.session != nil { // only support one session at the moment
-            return nil
-        }
-        
-        let session = Session(
-            metalDevice: self.metalDevice,
-            arSession: ARKitSession(),
-            worldTrackingProvider: WorldTrackingProvider(),
-            commandQueue: self.metalDevice.makeCommandQueue()!,
-            renderer: setupRenderer(device: self.metalDevice),
-            eventQueue: self.eventQueue,
-            handtrackingProvider: HandTrackingProvider()
-        )
-        session.commandQueue.label = "openxr command queue"
-        return session
-    }
-    
-    func getXrInstance() -> XrInstance? {
-        return unsafeBitCast(self, to: XrInstance?.self)
-    }
-}
 
 extension XrInstance {
     func getInstance() -> Instance? {
         return unsafeBitCast(self, to: Instance?.self)
     }
 }
+
+func printControllerInfo(for controller: GCController) {
+    print("Controller: \(controller.description ?? "Unknown")")
+//    controller.description
+    
+    if let extendedGamepad = controller.extendedGamepad {
+        print("ExtendedGamepad:")
+        print("  Left Thumbstick:  x: \(extendedGamepad.leftThumbstick.xAxis.value), y: \(extendedGamepad.leftThumbstick.yAxis.value)")
+        print("  Right Thumbstick: x: \(extendedGamepad.rightThumbstick.xAxis.value), y: \(extendedGamepad.rightThumbstick.yAxis.value)")
+        print("  Triggers:     \(extendedGamepad.leftTrigger), \(extendedGamepad.rightTrigger)")
+        print("  Button A: \(extendedGamepad.buttonA.isPressed) B: \(extendedGamepad.buttonB.isPressed) X: \(extendedGamepad.buttonX.isPressed) Y: \(extendedGamepad.buttonY.isPressed)")
+        print("  \(extendedGamepad.dpad)")
+        print("  Shoulder: \(extendedGamepad.leftShoulder), \(extendedGamepad.rightShoulder)")
+        print("  extra: \(extendedGamepad.buttonOptions), \(extendedGamepad.buttonMenu)")
+    } else {
+        print("No recognized gamepad profile available.")
+    }
+    
+    // Print motion data.
+    print("\n== Motion Data ==")
+    if let motion = controller.motion {
+        print("  Attitude:      \(motion.attitude)")
+        print("  Rotation Rate: \(motion.rotationRate)")
+        print("  Gravity:       \(motion.gravity)")
+        print("  Acceleration:  \(motion.acceleration)")
+    } else {
+        print("No motion data available.")
+    }
+    
+    print("==============================================\n")
+}
+
 
 @_cdecl("xrCreateInstance")
 public func xrCreateInstance(_ createInfo: UnsafePointer<XrInstanceCreateInfo>?,
@@ -465,7 +493,20 @@ public func xrCreateInstance(_ createInfo: UnsafePointer<XrInstanceCreateInfo>?,
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     
-    let instance = Instance()
+    let controllers = GCController.controllers()
+    
+    let instance = Instance(controllers: controllers)
+    
+    // Register for notifications to update the list when controllers connect/disconnect
+    NotificationCenter.default.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { _ in
+        instance.controllers = GCController.controllers()
+        print("controller connected \(instance.controllers)")
+    }
+    NotificationCenter.default.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { _ in
+        instance.controllers = GCController.controllers()
+        print("controller disconnected \(instance.controllers)")
+    }
+    
 //    instanceOut.pointee = instance.getXrInstance()! // TODO
     instanceOut.pointee = OpaquePointer(Unmanaged.passRetained(instance).toOpaque())
     return XR_SUCCESS
@@ -1611,10 +1652,10 @@ class FloatAction : ActionValue {
         self.value = value
     }
     
-    func getFloat() -> Float {
+    func get() -> Float {
         return value
     }
-    func setFloat(val : Float) {
+    func set(val : Float) {
         self.value = val
     }
 }
@@ -1625,10 +1666,24 @@ class BoolAction : ActionValue {
         self.value = value
     }
     
-    func getFloat() -> Bool {
+    func get() -> Bool {
         return value
     }
-    func setFloat(val : Bool) {
+    func set(val : Bool) {
+        self.value = val
+    }
+}
+
+class VectorAction : ActionValue {
+    var value : SIMD2<Float>
+    init(value : SIMD2<Float>) {
+        self.value = value
+    }
+    
+    func get() -> SIMD2<Float> {
+        return value
+    }
+    func set(val : SIMD2<Float>) {
         self.value = val
     }
 }
@@ -1856,7 +1911,7 @@ public func xrDestroyAction(_ action: XrAction) -> XrResult {
 @_cdecl("xrSyncActions")
 public func xrSyncActions(_ xrSession: XrSession, _ syncInfo: UnsafePointer<XrActionsSyncInfo>?) -> XrResult {
     let session = xrSession.getSession()!
-    
+
     // TODO more than one active action set
     let actionSet = syncInfo!.pointee.activeActionSets[0].actionSet.getActionSet()
     
@@ -1864,10 +1919,10 @@ public func xrSyncActions(_ xrSession: XrSession, _ syncInfo: UnsafePointer<XrAc
         switch actionName {
         case "pickup":
             if let leftValue = action.subpaths["/user/hand/left"] as? FloatAction {
-                leftValue.setFloat(val: session.handTrackers[XR_HAND_LEFT_EXT]!.grasp)
+                leftValue.set(val: session.handTrackers[XR_HAND_LEFT_EXT]!.grasp)
             }
             if let rightValue = action.subpaths["/user/hand/right"] as? FloatAction {
-                rightValue.setFloat(val: session.handTrackers[XR_HAND_RIGHT_EXT]!.grasp)
+                rightValue.set(val: session.handTrackers[XR_HAND_RIGHT_EXT]!.grasp)
             }
         case "pose":
             // nothing to do cause
@@ -1875,6 +1930,10 @@ public func xrSyncActions(_ xrSession: XrSession, _ syncInfo: UnsafePointer<XrAc
         default:
             print("xrSyncActions unknown action \(actionName)")
         }
+    }
+    
+    for controller in session.instance!.controllers {
+        printControllerInfo(for: controller)
     }
     return XR_SUCCESS
 }
@@ -1891,11 +1950,18 @@ extension XrActionStateGetInfo {
 public func xrGetActionStateBoolean(_ session: XrSession,
                                     _ getInfo: UnsafePointer<XrActionStateGetInfo>?,
                                     _ state: UnsafeMutablePointer<XrActionStateBoolean>?) -> XrResult {
-    guard let state = state else {
-        return XR_ERROR_FUNCTION_UNSUPPORTED
+    let action = getInfo!.pointee.action.getAction()
+    let subpath = getInfo!.pointee.subactionPath
+    
+    if let val = (action!.subpaths[xrPathToStringDictionary[subpath]!] as? BoolAction) {
+        state!.pointee.currentState = val.get() ? 1 : 0
+        state!.pointee.changedSinceLastSync = 1
+        state!.pointee.isActive = 1
+    } else {
+        state!.pointee.isActive = 0
     }
-    print("xrGetActionStateBoolean")
-    getInfo?.pointee.print_()
+
+//    state!.pointee.lastChangeTime // TODO
     return XR_SUCCESS
 }
 
@@ -1907,14 +1973,14 @@ public func xrGetActionStateFloat(_ session: XrSession,
     let subpath = getInfo!.pointee.subactionPath
     
     if let val = (action!.subpaths[xrPathToStringDictionary[subpath]!] as? FloatAction) {
-        state!.pointee.currentState = val.getFloat()
+        state!.pointee.currentState = val.get()
         state!.pointee.changedSinceLastSync = 1
         state!.pointee.isActive = 1
     } else {
         state!.pointee.isActive = 0
     }
 
-//    state!.pointee.lastChangeTime // TODO
+//    state!.pointee.lastChangeTime // TODO I think this is what godot uses to trigger signals
     
     return XR_SUCCESS
 }
@@ -1927,8 +1993,23 @@ public func xrGetActionStateVector2f(_ session: XrSession,
         return XR_ERROR_FUNCTION_UNSUPPORTED
     }
     print("xrGetActionStateVector2f")
-    getInfo?.pointee.print_()
+    
+    let action = getInfo!.pointee.action.getAction()
+    let subpath = getInfo!.pointee.subactionPath
+
+    if let val = (action!.subpaths[xrPathToStringDictionary[subpath]!] as? VectorAction) {
+        let tmp = val.get()
+        state.pointee.currentState.x = tmp.x
+        state.pointee.currentState.y = tmp.y
+        state.pointee.changedSinceLastSync = 1
+        state.pointee.isActive = 1
+    } else {
+        state.pointee.isActive = 0
+    }
+
+    //    state!.pointee.lastChangeTime // TODO
     return XR_SUCCESS
+    
 }
 extension XrActionsSyncInfo {
     func print_() {
@@ -2036,7 +2117,12 @@ public func xrSuggestInteractionProfileBindings(_ instance: XrInstance,
             print("  suggestedBindings: nil or empty")
         }
     }
-    // TODO we should store the info passed to be able to return proper profile
+    // TODO we're supposed to be picking the best interaction profile match for the current user setup
+    // these profiles are effectively the game engine telling us what the developer has tested, so if there's
+    // a direct match then use that, otherwise use something that is closest
+    
+    // here we're gonna be defaulting to hand interaction, cause vision is always gonna have hands available. and
+    // if a controller is connected, match the controller type to best interaction profile
     return XR_SUCCESS
 }
 
@@ -2177,9 +2263,15 @@ class ActionSpace: Space {
         switch (action.name, subactionPath) {
         case ("pose", "/user/hand/right"):
             let handAnchor = session.handTrackingProvider.handAnchors(at: at)
+            if handAnchor.rightHand == nil {
+                return nil
+            }
             return handAnchor.rightHand!.originFromAnchorTransform * gripSurfaceTransform(from: handAnchor.rightHand!)!
         case ("pose", "/user/hand/left"):
             let handAnchor = session.handTrackingProvider.handAnchors(at: at)
+            if handAnchor.leftHand == nil {
+                return nil
+            }
             return handAnchor.leftHand!.originFromAnchorTransform * gripSurfaceTransform(from: handAnchor.leftHand!)!
         default:
             fatalError("Unknown match for action: \(action.name) and subactionPath: \(subactionPath)")
