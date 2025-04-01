@@ -260,37 +260,48 @@ struct MetalLayerConfiguration: CompositorLayerConfiguration {
         configuration.colorFormat = .rgba16Float
     }
 }
+import Combine
 
-//var controllers: [GCController] = GCController.controllers()
+public class OpenXRState: ObservableObject {
+    @Published var showImmersiveSpace = false
+    @Published var isLoading = true
+}
+
+var openXrSceneState : OpenXRState?
+
+public func CreateOpenXR(onInit: ((LayerRenderer) -> Void)?) -> OpenXRScene {
+    openXrSceneState = OpenXRState()
+    DispatchQueue.main.async {
+        openXrSceneState!.showImmersiveSpace = true
+    }
+    return OpenXRScene(onInit: onInit, state: openXrSceneState!)
+}
+
 public struct OpenXRScene: Scene {
-    @State  var immersionStyle: ImmersionStyle = MixedImmersionStyle.mixed
+    @State var immersionStyle: ImmersionStyle = MixedImmersionStyle.mixed
     let onInit: ((LayerRenderer) -> Void)?
-    let onAppear: (() -> Void)?
-    @Binding var setImmersiveSpace: Bool
-    @Binding var isLoading: Bool
     
+    @StateObject var state: OpenXRState
 
-    public init(onInit: ((LayerRenderer) -> Void)?, onAppear: (() -> Void)?, setImmersiveSpace: Binding<Bool>, isLoading: Binding<Bool>) {
+    public init(onInit: ((LayerRenderer) -> Void)?,
+                state: OpenXRState) {
         self.onInit = onInit
-        self.onAppear = onAppear
-        _setImmersiveSpace = setImmersiveSpace
-        _isLoading = isLoading
+        _state = StateObject(wrappedValue: state)
     }
 
     public var body: some SwiftUI.Scene {
         WindowGroup {
-            ContentView($immersionStyle, $setImmersiveSpace, $isLoading)
+            ContentView(state: state)
                 .frame(minWidth: 480, maxWidth: 480, minHeight: 200, maxHeight: 320)
                 .onAppear {
-                    onAppear?()
                 }
         }
         .windowResizability(.contentSize)
-        ImmersiveSpace(id: "OpenXR") {
+        ImmersiveSpace(id: "OpenVision") {
             CompositorLayer(configuration: MetalLayerConfiguration()) { layerRenderer in
                 onInit?(layerRenderer)
                 globalLayerRenderer = layerRenderer
-                print("entered immersive space")
+                print("ImmersiveSpace init")
             }
         }
         .immersionStyle(selection: $immersionStyle, in: .full, .mixed)
@@ -302,43 +313,26 @@ struct ContentView: View {
     @Environment(\.openImmersiveSpace) var openImmersiveSpace
     @Environment(\.dismissImmersiveSpace) var dismissImmersiveSpace
     @Environment(\.dismiss) private var dismiss
-    
-    @Binding private var immersionStyle: any ImmersionStyle
-    @Binding var showImmersiveSpace: Bool
-    
-    //    @State private var useMixedImmersion = false
-    //    @State private var passthroughCutoffAngle = 60.0
-    @Binding var isLoading: Bool
-    
-    init(_ immersionStyle: Binding<any ImmersionStyle>, _ showImmersiveSpace: Binding<Bool>, _ isLoading: Binding<Bool>) {
-        _immersionStyle = immersionStyle
-        _showImmersiveSpace = showImmersiveSpace
-        _isLoading = isLoading
-    }
-    
+
+    @ObservedObject var state: OpenXRState
+
     var body: some View {
         VStack {
-            if isLoading {
+            if state.isLoading {
                 Image("SplashImage")
             }
         }
-        .onChange(of: showImmersiveSpace) { _, newValue in
+        .onChange(of: state.showImmersiveSpace) { _, newValue in
             Task {
                 print("showImmersiveSpace", newValue)
                 if newValue {
-                    await openImmersiveSpace(id: "OpenXR")
+                    await openImmersiveSpace(id: "OpenVision")
                 } else {
                     await dismissImmersiveSpace()
                 }
             }
         }
-        //        .onChange(of: useMixedImmersion) { _, _ in
-        //            immersionStyle = useMixedImmersion ? .mixed : .full
-        //        }
-        //        .onChange(of: passthroughCutoffAngle) { _, _ in
-        //            // Adjust renderer configuration if needed.
-        //        }
-        .onChange(of: isLoading) { _, newValue in
+        .onChange(of: state.isLoading) { _, newValue in
             if !newValue {
                 dismiss()
             }
@@ -506,6 +500,7 @@ public func xrCreateInstance(_ createInfo: UnsafePointer<XrInstanceCreateInfo>?,
         instance.controllers = GCController.controllers()
         print("controller disconnected \(instance.controllers)")
     }
+    
     
 //    instanceOut.pointee = instance.getXrInstance()! // TODO
     instanceOut.pointee = OpaquePointer(Unmanaged.passRetained(instance).toOpaque())
@@ -1037,6 +1032,10 @@ public func xrBeginSession(_ xrsession: XrSession,
     session.eventQueue.newEvent(Event.sessionStateChanged(state:XR_SESSION_STATE_SYNCHRONIZED))
     session.eventQueue.newEvent(Event.sessionStateChanged(state:XR_SESSION_STATE_VISIBLE))
     session.eventQueue.newEvent(Event.sessionStateChanged(state:XR_SESSION_STATE_FOCUSED))
+    
+    DispatchQueue.main.async {
+        openXrSceneState!.isLoading = false
+    }
     return XR_SUCCESS
 }
 
