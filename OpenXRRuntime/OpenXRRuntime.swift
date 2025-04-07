@@ -254,7 +254,7 @@ struct MetalLayerConfiguration: CompositorLayerConfiguration {
         
         // although we copy the user texture to the final texture, there is still benefit for foveation
         // when the user texture is bigger than the layer renderer one
-        configuration.isFoveationEnabled = false//supportsFoveation
+        configuration.isFoveationEnabled = supportsFoveation
         
         print("supportsFoveation: \(supportsFoveation)")
         configuration.colorFormat = .rgba16Float
@@ -269,22 +269,21 @@ public class OpenXRState: ObservableObject {
 
 var openXrSceneState : OpenXRState?
 
-public func CreateOpenXR(onInit: ((LayerRenderer) -> Void)?) -> OpenXRScene {
+public func CreateOpenXR(onInit: (() -> Void)?) -> OpenXRScene {
     openXrSceneState = OpenXRState()
     DispatchQueue.main.async {
         openXrSceneState!.showImmersiveSpace = true
     }
-    return OpenXRScene(onInit: onInit, state: openXrSceneState!)
+    return OpenXRScene(state: openXrSceneState!, onInit: onInit)
 }
 
 public struct OpenXRScene: Scene {
     @State var immersionStyle: ImmersionStyle = MixedImmersionStyle.mixed
-    let onInit: ((LayerRenderer) -> Void)?
+    let onInit: (() -> Void)?
     
     @StateObject var state: OpenXRState
 
-    public init(onInit: ((LayerRenderer) -> Void)?,
-                state: OpenXRState) {
+    public init(state: OpenXRState, onInit: (() -> Void)?) {
         self.onInit = onInit
         _state = StateObject(wrappedValue: state)
     }
@@ -299,9 +298,9 @@ public struct OpenXRScene: Scene {
         .windowResizability(.contentSize)
         ImmersiveSpace(id: "OpenVision") {
             CompositorLayer(configuration: MetalLayerConfiguration()) { layerRenderer in
-                onInit?(layerRenderer)
                 globalLayerRenderer = layerRenderer
                 print("ImmersiveSpace init")
+                onInit?()
             }
         }
         .immersionStyle(selection: $immersionStyle, in: .full, .mixed)
@@ -754,11 +753,11 @@ public func xrLocateViews(_ session: XrSession,
                           _ viewCapacityInput: UInt32,
                           _ viewCountOutput: UnsafeMutablePointer<UInt32>?,
                           _ views: UnsafeMutablePointer<XrView>?) -> XrResult {
-//    print("xrLocateViews")
     let sess = session.getSession()!
 
-    // TODO returns nil if minimised
+    // TODO returns nil if minimised or rendering is too slow
     let drawable = sess.currentFrame!.queryDrawable()!
+    
 //    print("drawable size: (\(drawable.colorTextures[0].width),\(drawable.colorTextures[0].height))")
     
     let (seconds, attoseconds) = LayerRenderer.Clock.Instant.epoch.duration(to: drawable.frameTiming.presentationTime).components
@@ -794,6 +793,7 @@ public func xrLocateViews(_ session: XrSession,
     if let views = views {
         for i in 0..<viewCount {
             let view = drawable.views[i]
+            // TODO deviceAnchor sometimes nil
             let viewMatrix = (deviceAnchor!.originFromAnchorTransform*view.transform)
             
             let translation = viewMatrix.translation
@@ -1215,20 +1215,17 @@ public func xrEnumerateViewConfigurationViews(_ instance: XrInstance,
             views[i].next = nil
 
             // TODO calculate these better
-            views[i].recommendedImageRectWidth = 1920
-            views[i].recommendedImageRectHeight = 1824
+            views[i].recommendedImageRectWidth = UInt32(1920*1.5)
+            views[i].recommendedImageRectHeight = UInt32(1824*1.5)
             
-//            views[i].recommendedImageRectWidth = 2880
-//            views[i].recommendedImageRectHeight = 2736
             
-            views[i].maxImageRectWidth = 4065
-            views[i].maxImageRectHeight = 3263
+            views[i].maxImageRectWidth = 1920*2
+            views[i].maxImageRectHeight = 1824*2
             
             // sim: drawable size: (2732,2048)
             // device: drawable size: (1920,1824)
-            // screen: 4065x3263
+            // screen(from vrr): 4065x3263
 
-            // TODO maxs
             views[i].recommendedSwapchainSampleCount = 1
         }
     }
@@ -1350,15 +1347,10 @@ public func xrLocateHandJointsEXT(_ handTracker: XrHandTrackerEXT,
     var jointRotationAdjustment : simd_quatf?
     if ht.chirality == XR_HAND_LEFT_EXT {
         handAnchor = leftAnchor
-        jointRotationAdjustment = simd_quatf(angle: .pi / 2, axis: simd_float3(0, -1, 0))
-        // i dunno how to get this right
-        jointRotationAdjustment =  jointRotationAdjustment! *
-            simd_quatf(angle: .pi / 2, axis: simd_float3(0, 0, -2))
-
+        jointRotationAdjustment = leftHandOpenXrAdjustment * simd_quatf(angle: .pi / 2, axis: simd_float3(0, 0, 1))
     } else if ht.chirality == XR_HAND_RIGHT_EXT {
         handAnchor = rightAnchor
-        jointRotationAdjustment = simd_quatf(angle: .pi / 2, axis: simd_float3(0, 1, 0))
-
+        jointRotationAdjustment = rightHandOpenXrAdjustment * simd_quatf(angle: .pi / 2, axis: simd_float3(0, 0, -1))
     } else {
         print("Unknown hand chirality")
         return XR_ERROR_RUNTIME_FAILURE
@@ -1366,9 +1358,7 @@ public func xrLocateHandJointsEXT(_ handTracker: XrHandTrackerEXT,
     
     let openxrJointCount = locations.pointee.jointCount
     locations.pointee.isActive = XrBool32(handAnchor != nil ? XR_TRUE : XR_FALSE)
-//    print("joint count: \(openxrJointCount)")
     
-    // Ensure the jointLocations pointer is valid.
     guard let jointLocationsPtr = locations.pointee.jointLocations else {
         print("jointLocations pointer is nil")
         return XR_ERROR_RUNTIME_FAILURE
@@ -1931,9 +1921,9 @@ public func xrSyncActions(_ xrSession: XrSession, _ syncInfo: UnsafePointer<XrAc
         }
     }
     
-    for controller in session.instance!.controllers {
-        printControllerInfo(for: controller)
-    }
+    //for controller in session.instance!.controllers {
+    //    printControllerInfo(for: controller)
+    //}
     return XR_SUCCESS
 }
 
@@ -2233,18 +2223,32 @@ class FixedSpace: Space {
         return "FixedSpace:\n  pose: \(pose)"
     }
 }
-import simd
 
-
-// TODO fix
+// TODO pretty close now, maybe just need a bit of an offset away from the palm
 func gripSurfaceTransform(from handAnchor: HandAnchor) -> simd_float4x4? {
-    // Ensure the hand skeleton is available.
     guard let handSkeleton = handAnchor.handSkeleton else {
         return nil
     }
     
-    return matrix_identity_float4x4
+    // Use the wrist, index finger knuckle, and little finger knuckle to compute the palm center.
+    let wristTransform = handSkeleton.joint(.wrist).anchorFromJointTransform
+    let indexKnuckleTransform = handSkeleton.joint(.indexFingerKnuckle).anchorFromJointTransform
+    let littleKnuckleTransform = handSkeleton.joint(.littleFingerKnuckle).anchorFromJointTransform
+    
+    let wristPos = wristTransform.translation
+    let indexPos = indexKnuckleTransform.translation
+    let littlePos = littleKnuckleTransform.translation
+    
+    let palmCenter = (wristPos + indexPos + littlePos) / 3.0
+    
+    var transform = matrix_identity_float4x4
+    transform.columns.3 = SIMD4<Float>(palmCenter, 1)
+    
+    return transform
 }
+
+let rightHandOpenXrAdjustment = simd_quatf(angle: .pi / 2, axis: simd_float3(0, 1, 0)) * simd_quatf(angle: .pi / 2, axis: simd_float3(0, 0, 1))
+let leftHandOpenXrAdjustment = simd_quatf(angle: .pi / 2, axis: simd_float3(0, -1, 0)) * simd_quatf(angle: .pi / 2, axis: simd_float3(0, 0, 1))
 
 // A space that calculates its pose based on an action reference.
 class ActionSpace: Space {
@@ -2265,13 +2269,19 @@ class ActionSpace: Space {
             if handAnchor.rightHand == nil {
                 return nil
             }
-            return handAnchor.rightHand!.originFromAnchorTransform * gripSurfaceTransform(from: handAnchor.rightHand!)!
+            return handAnchor.rightHand!.originFromAnchorTransform *
+                    gripSurfaceTransform(from: handAnchor.rightHand!)! *
+                    simd_float4x4(rightHandOpenXrAdjustment)
+            
         case ("pose", "/user/hand/left"):
             let handAnchor = session.handTrackingProvider.handAnchors(at: at)
             if handAnchor.leftHand == nil {
                 return nil
             }
-            return handAnchor.leftHand!.originFromAnchorTransform * gripSurfaceTransform(from: handAnchor.leftHand!)!
+
+            return handAnchor.leftHand!.originFromAnchorTransform *
+                    gripSurfaceTransform(from: handAnchor.leftHand!)! *
+                    simd_float4x4(leftHandOpenXrAdjustment)
         default:
             fatalError("Unknown match for action: \(action.name) and subactionPath: \(subactionPath)")
         }
@@ -2509,6 +2519,7 @@ public func xrCreateSwapchain(_ xrSession: XrSession,
     if (createInfo!.pointee.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0 {
         descriptor.resourceOptions = .storageModePrivate
     }
+    
 #if targetEnvironment(simulator)
     descriptor.arrayLength = 1
 #else
@@ -2518,6 +2529,7 @@ public func xrCreateSwapchain(_ xrSession: XrSession,
     // one swapchain texture for now
     var textures: [MTLTexture] = []
     if let texture = session.metalDevice.makeTexture(descriptor: descriptor) {
+        texture.label = "OpenVision texture"
         textures.append(texture)
     }
     
