@@ -902,7 +902,7 @@ func setupRenderer(device: MTLDevice) -> Renderer {
         float sample = depthTexture.sample(samplr, in.texCoord, in.layer).r;
         
         // avoid 0 for now as it is rendered black
-        out.depth = sample > 0.0001 ? sample : 0.0001;
+        out.depth = max(sample, 0.0001);
         return out;
     }
     """
@@ -1215,8 +1215,8 @@ public func xrEnumerateViewConfigurationViews(_ instance: XrInstance,
             views[i].next = nil
 
             // TODO calculate these better
-            views[i].recommendedImageRectWidth = UInt32(1920*1.5)
-            views[i].recommendedImageRectHeight = UInt32(1824*1.5)
+            views[i].recommendedImageRectWidth = UInt32(1920*2)
+            views[i].recommendedImageRectHeight = UInt32(1824*2)
             
             
             views[i].maxImageRectWidth = 1920*2
@@ -2508,17 +2508,17 @@ public func xrCreateSwapchain(_ xrSession: XrSession,
                                                               width: Int(ci.width),
                                                               height: Int(ci.height),
                                                               mipmapped: false)
-    // if we want this texture to get foveated rendering then the user has
-    // to support not reading from the texture, so removing this would have to work
-    // (current impl it doesnt work cause we read it to render rip)
+    // ideally we return the texture from the drawable we get from layerrenderer, but in testing godot uses it in a way not supported
+    // I think it was the lack of .shaderRead.
     descriptor.usage = [.renderTarget,
                         .shaderRead,
-                        .pixelFormatView]
+                        // i think this was needed for forward plus but it prevents texture compression and affects performance a lot
+//                        .pixelFormatView
+                        ]
     descriptor.textureType = .type2DArray
-    
-    if (createInfo!.pointee.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0 {
-        descriptor.resourceOptions = .storageModePrivate
-    }
+    descriptor.resourceOptions = .storageModePrivate
+    // not sure how much this affects anything
+    descriptor.allowGPUOptimizedContents = true
     
 #if targetEnvironment(simulator)
     descriptor.arrayLength = 1
